@@ -1,0 +1,22 @@
+[plex]
+db_path = "/var/lib/plexmediaserver/Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db"
+server_url = "http://localhost:32400"
+token = "your-plex-token-here"
+poll_interval_secs = 30
+
+[paths]
+mergerfs_mount = "/mnt/media"
+cache_dir = "/mnt/ssd-cache"
+source_dir = "/mnt/smb"
+
+[cache]
+max_size_gb = 200.0
+lookahead = 4
+expiry_hours = 72
+activity_window_mins = 5
+min_free_space_gb = 10.0
+
+[schedule]
+cache_window_start = "08:00"
+cache_window_end = "02:00"
+respect_window_for_active = true

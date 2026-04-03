@@ -1,1 +1,3 @@
-// Episode prediction logic — given an active session, return next N episodes to cache
+// Phase 3: Episode prediction engine
+// Drains FUSE access events, queries Plex SQLite DB for episode ordering,
+// enqueues copy requests for next lookahead episodes.

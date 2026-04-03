@@ -1,22 +1,17 @@
+[paths]
+target_directory = "/mnt/media"         # Directory to overmount (existing SMB mount Plex reads from)
+cache_directory = "/mnt/ssd-cache"      # SSD cache storage (NOT the FUSE mount)
+
 [plex]
 db_path = "/var/lib/plexmediaserver/Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db"
-server_url = "http://localhost:32400"
-token = "your-plex-token-here"
-poll_interval_secs = 30
-
-[paths]
-mergerfs_mount = "/mnt/media"
-cache_dir = "/mnt/ssd-cache"
-source_dir = "/mnt/smb"
 
 [cache]
-max_size_gb = 200.0
-lookahead = 4
-expiry_hours = 72
-activity_window_mins = 5
-min_free_space_gb = 10.0
+max_size_gb = 200.0                      # Max total cache size on SSD
+lookahead = 4                            # Episodes to cache ahead of current
+expiry_hours = 72                        # Delete cached files not accessed within this window
+min_free_space_gb = 10.0                 # Stop caching if SSD free space drops below this
+passthrough_mode = false                 # If true, bypass cache entirely (debug/test mode)
 
 [schedule]
-cache_window_start = "08:00"
-cache_window_end = "02:00"
-respect_window_for_active = true
+cache_window_start = "08:00"             # Allowed caching window start (HH:MM, 24h)
+cache_window_end = "02:00"               # Allowed caching window end (wraps past midnight)

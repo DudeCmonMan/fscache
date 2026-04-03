@@ -5,43 +5,33 @@ use std::path::{Path, PathBuf};
 
 /// Copy `rel_path` from the backing store (via `backing_fd`) to `cache_dest`.
 ///
-/// Writes to `{cache_dest}.partial` during the copy, then atomically renames
-/// to `cache_dest` on success. FUSE ignores `.partial` files, so reads fall
-/// through to the original backing store until the copy completes.
+/// Writes to `{cache_dest}.partial` during the copy, then atomically renames to
+/// `cache_dest` on success. FUSE ignores `.partial` files, so reads fall through
+/// to the original backing store until the copy completes.
 ///
-/// This function is synchronous and should be called from `spawn_blocking`.
+/// This function is synchronous and intended for use with `spawn_blocking`.
 pub fn copy_to_cache(backing_fd: RawFd, rel_path: &Path, cache_dest: &Path) -> std::io::Result<()> {
-    // Ensure destination directory exists.
     if let Some(parent) = cache_dest.parent() {
         std::fs::create_dir_all(parent)?;
     }
 
-    let partial_path = partial_path(cache_dest);
-
-    // Open source via backing fd.
+    let partial = partial_path(cache_dest);
     let src_fd = open_via_backing(backing_fd, rel_path)?;
 
-    // Open/create the .partial destination file.
-    let dst_file = std::fs::OpenOptions::new()
+    let mut dst_file = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
-        .open(&partial_path)?;
+        .open(&partial)?;
 
-    // Copy using sendfile / fallback to read-write loop.
-    let result = copy_fd_to_file(src_fd, &dst_file);
-
-    // Always close the source fd.
+    let result = copy_by_pread(src_fd, &mut dst_file);
     unsafe { libc::close(src_fd) };
-
     result?;
 
-    // Sync before rename so the file is complete on disk.
     dst_file.sync_all()?;
     drop(dst_file);
 
-    // Atomic rename: .partial → final destination.
-    std::fs::rename(&partial_path, cache_dest)?;
+    std::fs::rename(&partial, cache_dest)?;
     tracing::debug!("copy_to_cache: {} -> {}", rel_path.display(), cache_dest.display());
     Ok(())
 }
@@ -65,29 +55,29 @@ fn open_via_backing(backing_fd: RawFd, rel_path: &Path) -> std::io::Result<RawFd
     }
 }
 
-/// Copy all bytes from `src_fd` to `dst_file` using a read/write loop.
-fn copy_fd_to_file(src_fd: RawFd, dst_file: &std::fs::File) -> std::io::Result<()> {
+/// Copy all bytes from `src_fd` to `dst_file` using pread, advancing offset manually.
+/// Avoids wrapping src_fd in File (which would cause a double-close).
+fn copy_by_pread(src_fd: RawFd, dst_file: &mut std::fs::File) -> std::io::Result<()> {
     use std::io::Write;
-    use std::os::unix::io::FromRawFd;
-
-    // Wrap src_fd in a File for safe reading. We close it manually after, so
-    // we need to avoid double-close: wrap in ManuallyDrop.
-    let mut src = std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(src_fd) });
-    let mut dst = std::mem::ManuallyDrop::new(
-        // Safety: we hold an exclusive reference to dst_file for this call's duration.
-        unsafe { std::fs::File::from_raw_fd(std::os::unix::io::IntoRawFd::into_raw_fd(
-            dst_file.try_clone()?
-        ))}
-    );
-
-    let mut buf = vec![0u8; 256 * 1024]; // 256 KiB chunks
+    let mut buf = vec![0u8; 256 * 1024];
+    let mut offset: libc::off_t = 0;
     loop {
-        use std::io::Read;
-        let n = src.read(&mut buf)?;
+        let n = unsafe {
+            libc::pread(
+                src_fd,
+                buf.as_mut_ptr() as *mut libc::c_void,
+                buf.len() as libc::size_t,
+                offset,
+            )
+        };
+        if n < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
         if n == 0 {
             break;
         }
-        dst.write_all(&buf[..n])?;
+        dst_file.write_all(&buf[..n as usize])?;
+        offset += n as libc::off_t;
     }
     Ok(())
 }

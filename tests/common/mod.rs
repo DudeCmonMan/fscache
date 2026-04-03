@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::sync::Arc;
 
 use fuser::{MountOption, SessionACL};
 use plex_hot_cache::cache::CacheManager;
@@ -56,14 +57,14 @@ impl FuseHarness {
         let cache_dir = TempDir::new()?;
 
         let mut fs = PlexHotCacheFs::new(backing.path())?;
-        let cache_mgr = CacheManager::new(
+        let cache_mgr = Arc::new(CacheManager::new(
             cache_dir.path().to_path_buf(),
             max_size_gb,
             expiry_hours,
             0.0, // no min-free-space check in tests
-        );
+        ));
         cache_mgr.startup_cleanup();
-        fs.cache = Some(cache_mgr);
+        fs.cache = Some(Arc::clone(&cache_mgr));
 
         let session = fuser::spawn_mount2(fs, mount.path(), &test_fuse_config())?;
 

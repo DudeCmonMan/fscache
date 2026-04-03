@@ -3,16 +3,15 @@ mod config;
 mod copier;
 mod fuse_fs;
 mod inode;
+mod plex_db;
+mod predictor;
+mod scheduler;
 mod utils;
-
-// Phase 3+ stubs (uncomment as phases are implemented)
-// mod predictor;
-// mod plex_db;
-// mod scheduler;
 
 use clap::Parser;
 use fuser::{MountOption, SessionACL};
 use std::path::PathBuf;
+use std::sync::Arc;
 
 const BUILD_VERSION: &str = env!("BUILD_VERSION");
 
@@ -61,14 +60,49 @@ async fn main() -> anyhow::Result<()> {
     fs.passthrough_mode = config.cache.passthrough_mode;
 
     // Set up SSD cache overlay.
-    let cache_manager = cache::CacheManager::new(
+    let cache_manager = Arc::new(cache::CacheManager::new(
         PathBuf::from(&config.paths.cache_directory),
         config.cache.max_size_gb,
         config.cache.expiry_hours,
         config.cache.min_free_space_gb,
-    );
+    ));
     cache_manager.startup_cleanup();
-    fs.cache = Some(cache_manager);
+    fs.cache = Some(Arc::clone(&cache_manager));
+
+    // Set up prediction pipeline.
+    let scheduler = scheduler::Scheduler::new(
+        &config.schedule.cache_window_start,
+        &config.schedule.cache_window_end,
+    )?;
+    let plex_db = plex_db::PlexDb::open(
+        std::path::Path::new(&config.plex.db_path),
+        &target,
+    ).ok();
+    if plex_db.is_none() {
+        tracing::warn!("Plex DB not available at {}, using regex fallback", config.plex.db_path);
+    }
+
+    let (access_tx, access_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (copy_tx, copy_rx) = tokio::sync::mpsc::channel::<predictor::CopyRequest>(64);
+
+    fs.access_tx = Some(access_tx);
+
+    let backing_fd = fs.backing_fd;
+    let predictor_instance = predictor::Predictor::new(
+        access_rx,
+        copy_tx,
+        Arc::clone(&cache_manager),
+        config.cache.lookahead,
+        plex_db,
+        scheduler,
+        backing_fd,
+    );
+    tokio::spawn(predictor_instance.run());
+    tokio::spawn(predictor::run_copier_task(
+        backing_fd,
+        copy_rx,
+        Arc::clone(&cache_manager),
+    ));
 
     // SessionACL::All is equivalent to 'allow_other' — lets Plex (a different user)
     // access the FUSE mount. Requires either root or 'user_allow_other' in /etc/fuse.conf.

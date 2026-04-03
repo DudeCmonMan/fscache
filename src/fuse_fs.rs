@@ -14,6 +14,7 @@ use libc::{AT_EMPTY_PATH, AT_SYMLINK_NOFOLLOW};
 
 use crate::cache::CacheManager;
 use crate::inode::InodeTable;
+use crate::predictor::AccessEvent;
 
 /// Short TTL so the kernel re-checks after a cache file appears.
 const TTL: Duration = Duration::from_secs(1);
@@ -21,12 +22,14 @@ const TTL: Duration = Duration::from_secs(1);
 pub struct PlexHotCacheFs {
     /// O_PATH fd opened to target_directory *before* the FUSE overmount.
     /// All backing-store access uses openat(backing_fd, relative_path, ...).
-    backing_fd: RawFd,
+    pub backing_fd: RawFd,
     inodes: Arc<Mutex<InodeTable>>,
     pub passthrough_mode: bool,
     /// Optional SSD cache overlay.  When set, `open()` checks this directory
     /// first and serves cached files from SSD when available.
-    pub cache: Option<CacheManager>,
+    pub cache: Option<Arc<CacheManager>>,
+    /// Channel to send access events to the predictor task.
+    pub access_tx: Option<tokio::sync::mpsc::UnboundedSender<AccessEvent>>,
 }
 
 impl PlexHotCacheFs {
@@ -53,6 +56,7 @@ impl PlexHotCacheFs {
             inodes: Arc::new(Mutex::new(InodeTable::new())),
             passthrough_mode: false,
             cache: None,
+            access_tx: None,
         })
     }
 
@@ -240,6 +244,14 @@ impl Filesystem for PlexHotCacheFs {
             Some(p) => p.to_path_buf(),
             None => { reply.error(Errno::ENOENT); return; }
         };
+
+        // Emit access event for the predictor (fire-and-forget).
+        if let Some(ref tx) = self.access_tx {
+            let _ = tx.send(AccessEvent {
+                relative_path: path.clone(),
+                timestamp: std::time::SystemTime::now(),
+            });
+        }
 
         // Cache overlay: serve from SSD if a complete cached copy exists.
         if !self.passthrough_mode {

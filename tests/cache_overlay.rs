@@ -112,12 +112,12 @@ fn passthrough_mode_bypasses_cache() {
 
     let mut fs = PlexHotCacheFs::new(backing.path()).unwrap();
     fs.passthrough_mode = true; // bypass cache
-    fs.cache = Some(CacheManager::new(
+    fs.cache = Some(std::sync::Arc::new(CacheManager::new(
         cache_dir.path().to_path_buf(),
         1.0,
         72,
         0.0,
-    ));
+    )));
 
     let mut config = fuser::Config::default();
     config.mount_options = vec![MountOption::RO, MountOption::FSName("test".to_string())];

@@ -1,0 +1,29 @@
+[Unit]
+Description=Plex Hot Cache — predictive SSD caching for Plex media
+Documentation=https://github.com/dudecmonman/plex-hot-cache
+After=network.target
+
+# Wait for the SMB/NFS media mount before starting.
+# Replace with the actual mount unit for your media share, e.g.:
+#   After=mnt-media.mount
+#   Requires=mnt-media.mount
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/plex-hot-cache --config /etc/plex-hot-cache/config.toml
+Restart=on-failure
+RestartSec=10
+
+# FUSE with allow_other requires root or user_allow_other in /etc/fuse.conf.
+User=root
+
+# Give the binary time to unmount FUSE cleanly before SIGKILL.
+TimeoutStopSec=30
+
+# Keep logs in the journal.
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=plex-hot-cache
+
+[Install]
+WantedBy=multi-user.target

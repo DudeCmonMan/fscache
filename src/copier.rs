@@ -18,20 +18,38 @@ pub fn copy_to_cache(backing_fd: RawFd, rel_path: &Path, cache_dest: &Path) -> s
     let partial = partial_path(cache_dest);
     let src_fd = open_via_backing(backing_fd, rel_path)?;
 
-    let mut dst_file = std::fs::OpenOptions::new()
+    let mut dst_file = match std::fs::OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
-        .open(&partial)?;
+        .open(&partial)
+    {
+        Ok(f) => f,
+        Err(e) => {
+            unsafe { libc::close(src_fd) };
+            return Err(e);
+        }
+    };
 
-    let result = copy_by_pread(src_fd, &mut dst_file);
+    let copy_result = copy_by_pread(src_fd, &mut dst_file);
     unsafe { libc::close(src_fd) };
-    result?;
 
-    dst_file.sync_all()?;
+    if let Err(e) = copy_result {
+        let _ = std::fs::remove_file(&partial);
+        return Err(e);
+    }
+
+    if let Err(e) = dst_file.sync_all() {
+        let _ = std::fs::remove_file(&partial);
+        return Err(e);
+    }
     drop(dst_file);
 
-    std::fs::rename(&partial, cache_dest)?;
+    if let Err(e) = std::fs::rename(&partial, cache_dest) {
+        let _ = std::fs::remove_file(&partial);
+        return Err(e);
+    }
+
     tracing::debug!("copy_to_cache: {} -> {}", rel_path.display(), cache_dest.display());
     Ok(())
 }

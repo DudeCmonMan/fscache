@@ -4,7 +4,10 @@ use std::sync::Arc;
 use fuser::{MountOption, SessionACL};
 use plex_hot_cache::cache::CacheManager;
 use plex_hot_cache::fuse_fs::PlexHotCacheFs;
+use plex_hot_cache::predictor::{run_copier_task, AccessEvent, CopyRequest, Predictor};
+use plex_hot_cache::scheduler::Scheduler;
 use tempfile::TempDir;
+use tokio::sync::mpsc;
 
 fn test_fuse_config() -> fuser::Config {
     let mut config = fuser::Config::default();
@@ -86,6 +89,55 @@ impl FuseHarness {
 
     pub fn cache_path(&self) -> &Path {
         self.cache.as_ref().expect("harness has no cache dir").path()
+    }
+
+    /// Full pipeline harness: FUSE + cache overlay + predictor + copier all wired together.
+    ///
+    /// The predictor/copier tasks are spawned on the current tokio runtime — call this
+    /// from inside `#[tokio::test]`.
+    pub fn new_full_pipeline(lookahead: usize) -> anyhow::Result<Self> {
+        let backing = TempDir::new()?;
+        let mount = TempDir::new()?;
+        let cache_dir = TempDir::new()?;
+
+        let mut fs = PlexHotCacheFs::new(backing.path())?;
+        let backing_fd = fs.backing_fd;
+
+        let cache_mgr = Arc::new(CacheManager::new(
+            cache_dir.path().to_path_buf(),
+            1.0,
+            72,
+            0.0,
+        ));
+        cache_mgr.startup_cleanup();
+        fs.cache = Some(Arc::clone(&cache_mgr));
+
+        let (access_tx, access_rx) = mpsc::unbounded_channel::<AccessEvent>();
+        let (copy_tx, copy_rx) = mpsc::channel::<CopyRequest>(64);
+        fs.access_tx = Some(access_tx);
+
+        // Spawn predictor and copier on the current tokio runtime.
+        let scheduler = Scheduler::new("00:00", "23:59").unwrap();
+        let predictor = Predictor::new(
+            access_rx,
+            copy_tx,
+            Arc::clone(&cache_mgr),
+            lookahead,
+            None, // no Plex DB in tests — use regex fallback
+            scheduler,
+            backing_fd,
+        );
+        tokio::spawn(predictor.run());
+        tokio::spawn(run_copier_task(backing_fd, copy_rx, Arc::clone(&cache_mgr)));
+
+        let session = fuser::spawn_mount2(fs, mount.path(), &test_fuse_config())?;
+
+        Ok(Self {
+            backing,
+            mount,
+            cache: Some(cache_dir),
+            _session: session,
+        })
     }
 }
 

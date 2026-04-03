@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use fuser::{MountOption, SessionACL};
+use plex_hot_cache::cache::CacheManager;
 use plex_hot_cache::fuse_fs::PlexHotCacheFs;
 use tempfile::TempDir;
 
@@ -24,11 +25,14 @@ pub struct FuseHarness {
     pub backing: TempDir,
     /// The FUSE filesystem is mounted here — reads come from backing.
     pub mount: TempDir,
+    /// Optional separate cache dir for cache overlay tests.
+    pub cache: Option<TempDir>,
     /// Kept alive to hold the FUSE mount; dropped at end of test to unmount.
     _session: fuser::BackgroundSession,
 }
 
 impl FuseHarness {
+    /// Plain passthrough harness (no cache overlay).
     pub fn new() -> anyhow::Result<Self> {
         let backing = TempDir::new()?;
         let mount = TempDir::new()?;
@@ -39,6 +43,34 @@ impl FuseHarness {
         Ok(Self {
             backing,
             mount,
+            cache: None,
+            _session: session,
+        })
+    }
+
+    /// Harness with a cache overlay.  `max_size_gb` and `expiry_hours` are
+    /// configurable so tests can trigger eviction with small values.
+    pub fn new_with_cache(max_size_gb: f64, expiry_hours: u64) -> anyhow::Result<Self> {
+        let backing = TempDir::new()?;
+        let mount = TempDir::new()?;
+        let cache_dir = TempDir::new()?;
+
+        let mut fs = PlexHotCacheFs::new(backing.path())?;
+        let cache_mgr = CacheManager::new(
+            cache_dir.path().to_path_buf(),
+            max_size_gb,
+            expiry_hours,
+            0.0, // no min-free-space check in tests
+        );
+        cache_mgr.startup_cleanup();
+        fs.cache = Some(cache_mgr);
+
+        let session = fuser::spawn_mount2(fs, mount.path(), &test_fuse_config())?;
+
+        Ok(Self {
+            backing,
+            mount,
+            cache: Some(cache_dir),
             _session: session,
         })
     }
@@ -49,6 +81,10 @@ impl FuseHarness {
 
     pub fn mount_path(&self) -> &Path {
         self.mount.path()
+    }
+
+    pub fn cache_path(&self) -> &Path {
+        self.cache.as_ref().expect("harness has no cache dir").path()
     }
 }
 

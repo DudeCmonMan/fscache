@@ -12,6 +12,7 @@ use fuser::{
 };
 use libc::{AT_EMPTY_PATH, AT_SYMLINK_NOFOLLOW};
 
+use crate::cache::CacheManager;
 use crate::inode::InodeTable;
 
 /// Short TTL so the kernel re-checks after a cache file appears.
@@ -23,6 +24,9 @@ pub struct PlexHotCacheFs {
     backing_fd: RawFd,
     inodes: Arc<Mutex<InodeTable>>,
     pub passthrough_mode: bool,
+    /// Optional SSD cache overlay.  When set, `open()` checks this directory
+    /// first and serves cached files from SSD when available.
+    pub cache: Option<CacheManager>,
 }
 
 impl PlexHotCacheFs {
@@ -48,6 +52,7 @@ impl PlexHotCacheFs {
             backing_fd: fd,
             inodes: Arc::new(Mutex::new(InodeTable::new())),
             passthrough_mode: false,
+            cache: None,
         })
     }
 
@@ -236,6 +241,25 @@ impl Filesystem for PlexHotCacheFs {
             None => { reply.error(Errno::ENOENT); return; }
         };
 
+        // Cache overlay: serve from SSD if a complete cached copy exists.
+        if !self.passthrough_mode {
+            if let Some(ref cache) = self.cache {
+                if cache.is_cached(&path) {
+                    let cache_path = cache.cache_path(&path);
+                    let c = path_to_cstring_abs(&cache_path);
+                    let fd = unsafe { libc::open(c.as_ptr(), libc::O_RDONLY) };
+                    if fd >= 0 {
+                        tracing::debug!("open ino={} path={:?} => cache hit fd={}", ino.0, path, fd);
+                        reply.opened(FileHandle(fd as u64), FopenFlags::empty());
+                        return;
+                    }
+                    // Cache file vanished between check and open — fall through to backing store.
+                    tracing::warn!("cache hit race for {:?}, falling back to backing store", path);
+                }
+            }
+        }
+
+        // Backing store passthrough.
         let c_path = path_to_cstring(&path);
         let fd = unsafe { libc::openat(self.backing_fd, c_path.as_ptr(), libc::O_RDONLY) };
 
@@ -362,6 +386,12 @@ fn path_to_cstring(path: &Path) -> CString {
     let bytes = path.as_os_str().as_bytes();
     let bytes = bytes.strip_prefix(b"/").unwrap_or(bytes);
     CString::new(bytes).unwrap_or_else(|_| CString::new(".").unwrap())
+}
+
+/// CString from an absolute path (preserves leading `/`).
+fn path_to_cstring_abs(path: &Path) -> CString {
+    CString::new(path.as_os_str().as_bytes())
+        .unwrap_or_else(|_| CString::new("/dev/null").unwrap())
 }
 
 fn last_errno() -> libc::c_int {

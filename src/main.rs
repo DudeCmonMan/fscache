@@ -1,11 +1,11 @@
+mod cache;
 mod config;
+mod copier;
 mod fuse_fs;
 mod inode;
 mod utils;
 
-// Phase 2+ stubs (uncomment as phases are implemented)
-// mod cache;
-// mod copier;
+// Phase 3+ stubs (uncomment as phases are implemented)
 // mod predictor;
 // mod plex_db;
 // mod scheduler;
@@ -59,6 +59,16 @@ async fn main() -> anyhow::Result<()> {
     // Open O_PATH fd to target BEFORE mounting FUSE over it
     let mut fs = fuse_fs::PlexHotCacheFs::new(&target)?;
     fs.passthrough_mode = config.cache.passthrough_mode;
+
+    // Set up SSD cache overlay.
+    let cache_manager = cache::CacheManager::new(
+        PathBuf::from(&config.paths.cache_directory),
+        config.cache.max_size_gb,
+        config.cache.expiry_hours,
+        config.cache.min_free_space_gb,
+    );
+    cache_manager.startup_cleanup();
+    fs.cache = Some(cache_manager);
 
     // SessionACL::All is equivalent to 'allow_other' — lets Plex (a different user)
     // access the FUSE mount. Requires either root or 'user_allow_other' in /etc/fuse.conf.

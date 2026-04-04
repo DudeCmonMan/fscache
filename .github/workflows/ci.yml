@@ -87,6 +87,8 @@ jobs:
           cp target/release/plex-hot-cache release/
           cp config.toml release/
           cp plex-hot-cache.service release/
+          cp LICENSE release/
+          cp README.md release/
           tar -czf "plex-hot-cache-${TAG}-linux-amd64.tar.gz" -C release .
 
       - name: Create GitHub Release

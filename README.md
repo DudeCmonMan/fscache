@@ -75,6 +75,14 @@ echo "user_allow_other" | sudo tee -a /etc/fuse.conf
 
 Or run the service as root (the default in the provided unit file).
 
+### 3a. You can "just go" from here
+```
+sudo chmod plex-hot-cache
+sudo ./ plex-hot-cache
+```
+
+This will launch the server manually and it "just works". You can use this to see if you like how it behaves.
+
 ### 4. systemd service
 
 ```bash

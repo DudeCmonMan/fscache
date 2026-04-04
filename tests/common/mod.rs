@@ -131,6 +131,9 @@ impl FuseHarness {
             None, // no Plex DB in tests — use regex fallback
             scheduler,
             backing_fd,
+            0, // max_cache_pull disabled by default in tests
+            cache_dir.path().to_path_buf(),
+            0, // deferred_ttl_minutes: 0 disables persistence in tests
         );
         tokio::spawn(predictor.run());
         tokio::spawn(run_copier_task(backing_fd, copy_rx, Arc::clone(&cache_mgr)));
@@ -209,6 +212,9 @@ impl OvermountHarness {
             None,
             scheduler,
             backing_fd,
+            0, // max_cache_pull disabled by default in tests
+            cache_dir.path().to_path_buf(),
+            0, // deferred_ttl_minutes: 0 disables persistence in tests
         );
         tokio::spawn(predictor.run());
         tokio::spawn(run_copier_task(backing_fd, copy_rx, Arc::clone(&cache_mgr)));

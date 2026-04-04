@@ -135,6 +135,10 @@ async fn main() -> anyhow::Result<()> {
     fs.access_tx = Some(access_tx);
 
     let backing_fd = fs.backing_fd;
+    let max_cache_pull_bytes = (config.cache.max_cache_pull_gb * 1_073_741_824.0) as u64;
+    if max_cache_pull_bytes > 0 {
+        tracing::info!("Max cache pull budget: {:.1} GB", config.cache.max_cache_pull_gb);
+    }
     let predictor_instance = predictor::Predictor::new(
         access_rx,
         copy_tx,
@@ -143,6 +147,9 @@ async fn main() -> anyhow::Result<()> {
         plex_db,
         scheduler,
         backing_fd,
+        max_cache_pull_bytes,
+        PathBuf::from(&config.paths.cache_directory),
+        config.cache.deferred_ttl_minutes,
     );
     tokio::spawn(predictor_instance.run());
     tokio::spawn(predictor::run_copier_task(

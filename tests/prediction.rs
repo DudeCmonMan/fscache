@@ -12,7 +12,8 @@ use tokio::sync::mpsc;
 use plex_hot_cache::cache::CacheManager;
 use plex_hot_cache::plex_db::PlexDb;
 use plex_hot_cache::predictor::{
-    parse_season_dir, parse_season_episode, run_copier_task, AccessEvent, CopyRequest, Predictor,
+    buffer_event, load_deferred, parse_season_dir, parse_season_episode, run_copier_task,
+    show_root, AccessEvent, CopyRequest, Predictor,
 };
 use plex_hot_cache::scheduler::Scheduler;
 
@@ -195,6 +196,9 @@ async fn predictor_caches_next_episodes_via_regex() {
         None,
         scheduler,
         backing_fd,
+        0, // max_cache_pull disabled
+        cache_dir.path().to_path_buf(),
+        0, // deferred_ttl_minutes: 0 disables persistence in tests
     );
     tokio::spawn(predictor.run());
     tokio::spawn(run_copier_task(backing_fd, copy_rx, Arc::clone(&cache)));
@@ -252,8 +256,10 @@ async fn predictor_skips_already_cached() {
     let (access_tx, access_rx) = mpsc::unbounded_channel::<AccessEvent>();
     let (copy_tx, copy_rx) = mpsc::channel::<CopyRequest>(32);
     let scheduler = Scheduler::new("00:00", "23:59").unwrap();
-    let predictor =
-        Predictor::new(access_rx, copy_tx, Arc::clone(&cache), 2, None, scheduler, backing_fd);
+    let predictor = Predictor::new(
+        access_rx, copy_tx, Arc::clone(&cache), 2, None, scheduler, backing_fd,
+        0, cache_dir.path().to_path_buf(), 0,
+    );
     tokio::spawn(predictor.run());
     tokio::spawn(run_copier_task(backing_fd, copy_rx, Arc::clone(&cache)));
 
@@ -324,7 +330,10 @@ async fn regex_crosses_season_boundary_structured_layout() {
     let (access_tx, access_rx) = mpsc::unbounded_channel::<AccessEvent>();
     let (copy_tx, copy_rx) = mpsc::channel::<CopyRequest>(32);
     let scheduler = Scheduler::new("00:00", "23:59").unwrap();
-    let predictor = Predictor::new(access_rx, copy_tx, Arc::clone(&cache), 4, None, scheduler, backing_fd);
+    let predictor = Predictor::new(
+        access_rx, copy_tx, Arc::clone(&cache), 4, None, scheduler, backing_fd,
+        0, cache_dir.path().to_path_buf(), 0,
+    );
     tokio::spawn(predictor.run());
     tokio::spawn(run_copier_task(backing_fd, copy_rx, Arc::clone(&cache)));
 
@@ -371,7 +380,10 @@ async fn regex_crosses_season_boundary_flat_layout() {
     let (access_tx, access_rx) = mpsc::unbounded_channel::<AccessEvent>();
     let (copy_tx, copy_rx) = mpsc::channel::<CopyRequest>(32);
     let scheduler = Scheduler::new("00:00", "23:59").unwrap();
-    let predictor = Predictor::new(access_rx, copy_tx, Arc::clone(&cache), 4, None, scheduler, backing_fd);
+    let predictor = Predictor::new(
+        access_rx, copy_tx, Arc::clone(&cache), 4, None, scheduler, backing_fd,
+        0, cache_dir.path().to_path_buf(), 0,
+    );
     tokio::spawn(predictor.run());
     tokio::spawn(run_copier_task(backing_fd, copy_rx, Arc::clone(&cache)));
 
@@ -420,4 +432,263 @@ fn copier_copies_file_correctly() {
     assert!(!std::path::Path::new(&partial).exists());
 
     unsafe { libc::close(backing_fd) };
+}
+
+// ---- max_cache_pull budget tests ----
+
+/// Budget=0 (disabled) → all lookahead candidates are queued.
+#[tokio::test]
+async fn predictor_budget_zero_means_disabled() {
+    let backing = TempDir::new().unwrap();
+    let cache_dir = TempDir::new().unwrap();
+
+    let ep_dir = backing.path().join("tv/Show");
+    std::fs::create_dir_all(&ep_dir).unwrap();
+    for i in 1..=5u32 {
+        // 100 bytes each
+        std::fs::write(ep_dir.join(format!("Show.S01E0{}.mkv", i)), vec![b'x'; 100]).unwrap();
+    }
+
+    let backing_fd = open_backing_fd(backing.path());
+    let cache = Arc::new(CacheManager::new(cache_dir.path().to_path_buf(), 1.0, 72, 0.0));
+    let (access_tx, access_rx) = mpsc::unbounded_channel::<AccessEvent>();
+    let (copy_tx, copy_rx) = mpsc::channel::<CopyRequest>(32);
+    let scheduler = Scheduler::new("00:00", "23:59").unwrap();
+    let predictor = Predictor::new(
+        access_rx, copy_tx, Arc::clone(&cache), 4, None, scheduler, backing_fd,
+        0, cache_dir.path().to_path_buf(), 0,
+    );
+    tokio::spawn(predictor.run());
+    tokio::spawn(run_copier_task(backing_fd, copy_rx, Arc::clone(&cache)));
+
+    access_tx.send(AccessEvent { relative_path: PathBuf::from("tv/Show/Show.S01E01.mkv") }).unwrap();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // All 4 lookahead candidates should be cached
+    for i in 2..=5u32 {
+        let cached = cache_dir.path().join(format!("tv/Show/Show.S01E0{}.mkv", i));
+        assert!(cached.exists(), "expected ep {} in cache with budget=0", i);
+    }
+
+    unsafe { libc::close(backing_fd) };
+}
+
+/// Budget enforcement: only episodes that fit within the budget are queued.
+/// 5 episodes × 100 bytes each; budget = 250 bytes → E02 (always), E03 (100+100=200 ≤ 250),
+/// E04 would push total to 300 > 250 → stopped.
+#[tokio::test]
+async fn predictor_respects_max_cache_pull_budget() {
+    let backing = TempDir::new().unwrap();
+    let cache_dir = TempDir::new().unwrap();
+
+    let ep_dir = backing.path().join("tv/Show");
+    std::fs::create_dir_all(&ep_dir).unwrap();
+    for i in 1..=5u32 {
+        std::fs::write(ep_dir.join(format!("Show.S01E0{}.mkv", i)), vec![b'x'; 100]).unwrap();
+    }
+
+    let backing_fd = open_backing_fd(backing.path());
+    let cache = Arc::new(CacheManager::new(cache_dir.path().to_path_buf(), 1.0, 72, 0.0));
+    let (access_tx, access_rx) = mpsc::unbounded_channel::<AccessEvent>();
+    let (copy_tx, copy_rx) = mpsc::channel::<CopyRequest>(32);
+    let scheduler = Scheduler::new("00:00", "23:59").unwrap();
+    // Budget = 250 bytes; cache is empty so running_total starts at 0.
+    // E02: first candidate, always queued → running_total = 100
+    // E03: 100 + 100 = 200 ≤ 250 → queued, running_total = 200
+    // E04: 200 + 100 = 300 > 250 → stopped
+    let predictor = Predictor::new(
+        access_rx, copy_tx, Arc::clone(&cache), 4, None, scheduler, backing_fd,
+        250, cache_dir.path().to_path_buf(), 0,
+    );
+    tokio::spawn(predictor.run());
+    tokio::spawn(run_copier_task(backing_fd, copy_rx, Arc::clone(&cache)));
+
+    access_tx.send(AccessEvent { relative_path: PathBuf::from("tv/Show/Show.S01E01.mkv") }).unwrap();
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    assert!(cache_dir.path().join("tv/Show/Show.S01E02.mkv").exists(), "E02 must be cached");
+    assert!(cache_dir.path().join("tv/Show/Show.S01E03.mkv").exists(), "E03 must be cached");
+    assert!(!cache_dir.path().join("tv/Show/Show.S01E04.mkv").exists(), "E04 must NOT be cached");
+    assert!(!cache_dir.path().join("tv/Show/Show.S01E05.mkv").exists(), "E05 must NOT be cached");
+
+    unsafe { libc::close(backing_fd) };
+}
+
+/// First candidate is always queued even if it alone exceeds the budget.
+#[tokio::test]
+async fn predictor_first_candidate_always_queued() {
+    let backing = TempDir::new().unwrap();
+    let cache_dir = TempDir::new().unwrap();
+
+    let ep_dir = backing.path().join("tv/Show");
+    std::fs::create_dir_all(&ep_dir).unwrap();
+    for i in 1..=3u32 {
+        std::fs::write(ep_dir.join(format!("Show.S01E0{}.mkv", i)), vec![b'x'; 200]).unwrap();
+    }
+
+    let backing_fd = open_backing_fd(backing.path());
+    let cache = Arc::new(CacheManager::new(cache_dir.path().to_path_buf(), 1.0, 72, 0.0));
+    let (access_tx, access_rx) = mpsc::unbounded_channel::<AccessEvent>();
+    let (copy_tx, copy_rx) = mpsc::channel::<CopyRequest>(32);
+    let scheduler = Scheduler::new("00:00", "23:59").unwrap();
+    // Budget = 50 bytes, each file is 200 bytes — smaller than any single file
+    let predictor = Predictor::new(
+        access_rx, copy_tx, Arc::clone(&cache), 2, None, scheduler, backing_fd,
+        50, cache_dir.path().to_path_buf(), 0,
+    );
+    tokio::spawn(predictor.run());
+    tokio::spawn(run_copier_task(backing_fd, copy_rx, Arc::clone(&cache)));
+
+    access_tx.send(AccessEvent { relative_path: PathBuf::from("tv/Show/Show.S01E01.mkv") }).unwrap();
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    // E02 must still be cached (first-candidate exemption)
+    assert!(cache_dir.path().join("tv/Show/Show.S01E02.mkv").exists(), "E02 must be cached (first-candidate exemption)");
+    // E03 must NOT be cached (running_total = 200 > budget 50)
+    assert!(!cache_dir.path().join("tv/Show/Show.S01E03.mkv").exists(), "E03 must NOT be cached");
+
+    unsafe { libc::close(backing_fd) };
+}
+
+/// Budget includes already-cached files — prevents infinite sliding window.
+/// Pre-cache E02 (100 bytes), budget = 250 bytes.
+/// User moves to E02: lookahead finds E03, E04, E05.
+/// running_total starts at 100 (existing cache).
+/// E03: first candidate, always queued → total = 200
+/// E04: 200 + 100 = 300 > 250 → stopped
+#[tokio::test]
+async fn predictor_budget_includes_existing_cache() {
+    let backing = TempDir::new().unwrap();
+    let cache_dir = TempDir::new().unwrap();
+
+    let ep_dir = backing.path().join("tv/Show");
+    std::fs::create_dir_all(&ep_dir).unwrap();
+    for i in 1..=5u32 {
+        std::fs::write(ep_dir.join(format!("Show.S01E0{}.mkv", i)), vec![b'x'; 100]).unwrap();
+    }
+
+    // Pre-populate E02 in cache (simulating prior caching)
+    let cache_ep_dir = cache_dir.path().join("tv/Show");
+    std::fs::create_dir_all(&cache_ep_dir).unwrap();
+    std::fs::write(cache_ep_dir.join("Show.S01E02.mkv"), vec![b'x'; 100]).unwrap();
+
+    let backing_fd = open_backing_fd(backing.path());
+    let cache = Arc::new(CacheManager::new(cache_dir.path().to_path_buf(), 1.0, 72, 0.0));
+    let (access_tx, access_rx) = mpsc::unbounded_channel::<AccessEvent>();
+    let (copy_tx, copy_rx) = mpsc::channel::<CopyRequest>(32);
+    let scheduler = Scheduler::new("00:00", "23:59").unwrap();
+    // Budget = 250 bytes; cache starts with 100 bytes already (E02).
+    // E03: first candidate, queued → running_total = 100 + 100 = 200
+    // E04: 200 + 100 = 300 > 250 → stopped
+    let predictor = Predictor::new(
+        access_rx, copy_tx, Arc::clone(&cache), 4, None, scheduler, backing_fd,
+        250, cache_dir.path().to_path_buf(), 0,
+    );
+    tokio::spawn(predictor.run());
+    tokio::spawn(run_copier_task(backing_fd, copy_rx, Arc::clone(&cache)));
+
+    // User moves to E02
+    access_tx.send(AccessEvent { relative_path: PathBuf::from("tv/Show/Show.S01E02.mkv") }).unwrap();
+    tokio::time::sleep(Duration::from_millis(600)).await;
+
+    // E02 was already in cache and is_cached=true → skipped (not re-copied)
+    assert_eq!(
+        std::fs::read(cache_ep_dir.join("Show.S01E02.mkv")).unwrap(),
+        vec![b'x'; 100],
+        "E02 must not be overwritten"
+    );
+    // E03 should be cached (first candidate)
+    assert!(cache_ep_dir.join("Show.S01E03.mkv").exists(), "E03 must be cached");
+    // E04 must NOT be cached (budget exceeded)
+    assert!(!cache_ep_dir.join("Show.S01E04.mkv").exists(), "E04 must NOT be cached (budget includes existing E02)");
+    assert!(!cache_ep_dir.join("Show.S01E05.mkv").exists(), "E05 must NOT be cached");
+
+    unsafe { libc::close(backing_fd) };
+}
+
+// ---- deferred event tests ----
+
+#[test]
+fn show_root_uses_parent_dir() {
+    assert_eq!(show_root(std::path::Path::new("Show/Season 1/S01E03.mkv")),
+               std::path::PathBuf::from("Show/Season 1"));
+    assert_eq!(show_root(std::path::Path::new("tv/Show/Show.S01E03.mkv")),
+               std::path::PathBuf::from("tv/Show"));
+    assert_eq!(show_root(std::path::Path::new("file.mkv")),
+               std::path::PathBuf::from(""));
+}
+
+#[test]
+fn buffer_event_keeps_most_advanced() {
+    use std::collections::HashMap;
+    let mut deferred = HashMap::new();
+
+    // Insert E01, then E04, then E02 — should keep E04
+    buffer_event(&mut deferred, AccessEvent { relative_path: PathBuf::from("Show/Show.S01E01.mkv") });
+    buffer_event(&mut deferred, AccessEvent { relative_path: PathBuf::from("Show/Show.S01E04.mkv") });
+    buffer_event(&mut deferred, AccessEvent { relative_path: PathBuf::from("Show/Show.S01E02.mkv") });
+
+    assert_eq!(deferred.len(), 1);
+    let kept = deferred.values().next().unwrap();
+    assert_eq!(kept.relative_path, PathBuf::from("Show/Show.S01E04.mkv"));
+}
+
+#[test]
+fn buffer_event_different_dirs_are_separate() {
+    use std::collections::HashMap;
+    let mut deferred = HashMap::new();
+
+    buffer_event(&mut deferred, AccessEvent { relative_path: PathBuf::from("ShowA/Show.S01E01.mkv") });
+    buffer_event(&mut deferred, AccessEvent { relative_path: PathBuf::from("ShowB/Show.S01E01.mkv") });
+
+    assert_eq!(deferred.len(), 2);
+}
+
+#[test]
+fn buffer_event_cross_season_keeps_higher() {
+    use std::collections::HashMap;
+    let mut deferred = HashMap::new();
+
+    // Same directory (flat layout), S01E08 then S02E01
+    buffer_event(&mut deferred, AccessEvent { relative_path: PathBuf::from("Show/Show.S01E08.mkv") });
+    buffer_event(&mut deferred, AccessEvent { relative_path: PathBuf::from("Show/Show.S02E01.mkv") });
+
+    assert_eq!(deferred.len(), 1);
+    let kept = deferred.values().next().unwrap();
+    assert_eq!(kept.relative_path, PathBuf::from("Show/Show.S02E01.mkv"));
+}
+
+#[test]
+fn buffer_event_non_episode_keyed_by_full_path() {
+    use std::collections::HashMap;
+    let mut deferred = HashMap::new();
+
+    buffer_event(&mut deferred, AccessEvent { relative_path: PathBuf::from("movies/Movie.mkv") });
+    buffer_event(&mut deferred, AccessEvent { relative_path: PathBuf::from("movies/Other.mkv") });
+
+    // Both non-episode files are kept separately (keyed by full path)
+    assert_eq!(deferred.len(), 2);
+}
+
+#[test]
+fn load_deferred_discards_stale_entries() {
+    let cache_dir = TempDir::new().unwrap();
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let records = serde_json::json!([
+        { "path": "Show/Show.S01E01.mkv", "timestamp": 0 },
+        { "path": "Show/Show.S01E04.mkv", "timestamp": now }
+    ]);
+    std::fs::write(
+        cache_dir.path().join("deferred_events.json"),
+        records.to_string(),
+    ).unwrap();
+
+    let loaded = load_deferred(cache_dir.path(), 60); // 60-minute TTL
+    assert_eq!(loaded.len(), 1, "stale entry should be discarded");
+    let kept = loaded.values().next().unwrap();
+    assert_eq!(kept.relative_path, PathBuf::from("Show/Show.S01E04.mkv"));
 }

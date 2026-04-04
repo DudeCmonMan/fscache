@@ -148,6 +148,15 @@ impl CacheManager {
             .unwrap_or(false)
     }
 
+    /// Returns the total size in bytes of all fully-cached files.
+    pub fn total_cached_bytes(&self) -> u64 {
+        collect_cache_files(&self.cache_dir)
+            .iter()
+            .filter_map(|p| std::fs::metadata(p).ok())
+            .map(|m| m.len())
+            .sum()
+    }
+
 }
 
 // ---- helpers ----

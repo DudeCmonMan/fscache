@@ -44,6 +44,12 @@ pub struct CacheConfig {
     /// When to notify the predictor. "cache-miss-only" (default) or "rolling-buffer".
     #[serde(default = "default_trigger_strategy")]
     pub trigger_strategy: String,
+    /// Total cache size budget enforced at prediction time (0.0 = unlimited).
+    #[serde(default)]
+    pub max_cache_pull_gb: f64,
+    /// Discard persisted deferred events older than this many minutes on startup (default 1440 = 24h).
+    #[serde(default = "default_deferred_ttl_minutes")]
+    pub deferred_ttl_minutes: u64,
 }
 
 impl Default for CacheConfig {
@@ -55,6 +61,8 @@ impl Default for CacheConfig {
             min_free_space_gb: default_min_free_space_gb(),
             passthrough_mode: false,
             trigger_strategy: default_trigger_strategy(),
+            max_cache_pull_gb: 0.0,
+            deferred_ttl_minutes: default_deferred_ttl_minutes(),
         }
     }
 }
@@ -111,6 +119,7 @@ fn default_plex_db_path() -> String {
     "/var/lib/plexmediaserver/Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db".to_string()
 }
 fn default_trigger_strategy() -> String { "cache-miss-only".to_string() }
+fn default_deferred_ttl_minutes() -> u64 { 1440 }
 fn default_max_size_gb() -> f64 { 200.0 }
 fn default_lookahead() -> usize { 4 }
 fn default_expiry_hours() -> u64 { 72 }

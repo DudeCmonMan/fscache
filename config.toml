@@ -13,6 +13,8 @@ expiry_hours = 72                        # Delete cached files not accessed with
 min_free_space_gb = 10.0                 # Stop caching if SSD free space drops below this
 passthrough_mode = false                 # If true, bypass cache entirely (debug/test mode)
 trigger_strategy = "cache-miss-only"     # "cache-miss-only" or "rolling-buffer"
+max_cache_pull_gb = 0.0                  # Total cache budget for predictions (0 = unlimited)
+deferred_ttl_minutes = 1440             # Discard saved deferred events older than this on startup (default 24h)
 
 [schedule]
 cache_window_start = "08:00"             # Allowed caching window start (HH:MM, 24h)

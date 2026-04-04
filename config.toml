@@ -21,4 +21,4 @@ cache_window_end = "02:00"               # Allowed caching window end (wraps pas
 log_directory = "/var/log/plex-hot-cache"  # Directory for rolling daily log files
 console_level = "info"                     # Log level for terminal output (error/warn/info/debug/trace)
 file_level = "debug"                       # Log level for log files (captures full detail)
-quiet_prefixes = ["Movies"]               # Downgrade access/hit/miss logs to DEBUG for these path prefixes
+repeat_log_window_secs = 60               # Suppress repeated access logs for the same file within this window (0 = disabled)

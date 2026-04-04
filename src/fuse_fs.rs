@@ -1,9 +1,10 @@
+use std::collections::HashMap;
 use std::ffi::{CStr, CString, OsStr};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::RawFd;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, UNIX_EPOCH};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 use fuser::{
     Errno, FileAttr, FileType, FileHandle, FopenFlags, Generation, INodeNo, KernelConfig,
@@ -30,8 +31,10 @@ pub struct PlexHotCacheFs {
     pub cache: Option<Arc<CacheManager>>,
     /// Channel to send access events to the predictor task.
     pub access_tx: Option<tokio::sync::mpsc::UnboundedSender<AccessEvent>>,
-    /// Path prefixes whose access/hit/miss logs are downgraded from INFO to DEBUG.
-    pub quiet_prefixes: Vec<String>,
+    /// How long to suppress repeated access/hit/miss logs for the same file path.
+    pub repeat_log_window: Duration,
+    /// Tracks the last time each file path was logged at INFO level.
+    recent_logs: Mutex<HashMap<PathBuf, Instant>>,
 }
 
 impl PlexHotCacheFs {
@@ -59,12 +62,29 @@ impl PlexHotCacheFs {
             passthrough_mode: false,
             cache: None,
             access_tx: None,
-            quiet_prefixes: vec![],
+            repeat_log_window: Duration::from_secs(60),
+            recent_logs: Mutex::new(HashMap::new()),
         })
     }
 
-    fn is_quiet(&self, path: &Path) -> bool {
-        self.quiet_prefixes.iter().any(|prefix| path.starts_with(prefix))
+    /// Returns true if this path was already logged at INFO within the repeat window.
+    /// On first call (or after the window expires), records the timestamp and returns false.
+    pub fn should_suppress_log(&self, path: &Path) -> bool {
+        if self.repeat_log_window.is_zero() {
+            return false;
+        }
+        let now = Instant::now();
+        let mut recent = self.recent_logs.lock().unwrap();
+        if recent.len() > 1000 {
+            recent.retain(|_, last| now.duration_since(*last) < self.repeat_log_window);
+        }
+        match recent.get(path) {
+            Some(&last) if now.duration_since(last) < self.repeat_log_window => true,
+            _ => {
+                recent.insert(path.to_path_buf(), now);
+                false
+            }
+        }
     }
 
     // ---- backing store helpers ----
@@ -252,9 +272,12 @@ impl Filesystem for PlexHotCacheFs {
             None => { reply.error(Errno::ENOENT); return; }
         };
 
+        // Determine once whether this path's logs should be suppressed (repeated within window).
+        let suppress = self.should_suppress_log(&path);
+
         // Emit access event for the predictor (fire-and-forget).
         if let Some(ref tx) = self.access_tx {
-            if self.is_quiet(&path) {
+            if suppress {
                 tracing::debug!("plex access: {:?}", path);
             } else {
                 tracing::info!("plex access: {:?}", path);
@@ -272,7 +295,7 @@ impl Filesystem for PlexHotCacheFs {
                     let c = path_to_cstring_abs(&cache_path);
                     let fd = unsafe { libc::open(c.as_ptr(), libc::O_RDONLY) };
                     if fd >= 0 {
-                        if self.is_quiet(&path) {
+                        if suppress {
                             tracing::debug!("cache HIT: {:?} (serving from SSD)", path);
                         } else {
                             tracing::info!("cache HIT: {:?} (serving from SSD)", path);
@@ -295,7 +318,7 @@ impl Filesystem for PlexHotCacheFs {
             return;
         }
 
-        if self.is_quiet(&path) {
+        if suppress {
             tracing::debug!("cache MISS: {:?} (serving from backing store)", path);
         } else {
             tracing::info!("cache MISS: {:?} (serving from backing store)", path);

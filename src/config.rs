@@ -80,10 +80,11 @@ pub struct LoggingConfig {
     pub console_level: String,
     #[serde(default = "default_file_level")]
     pub file_level: String,
-    /// Path prefixes whose access/hit/miss logs are downgraded from INFO to DEBUG.
-    /// Matched against the first path component (e.g. "Movies" matches "Movies/foo" but not "Movies2/foo").
-    #[serde(default)]
-    pub quiet_prefixes: Vec<String>,
+    /// Suppress repeated access/hit/miss logs for the same exact file path within this window.
+    /// First open logs at INFO; subsequent opens within the window log at DEBUG.
+    /// Set to 0 to disable (always log at INFO).
+    #[serde(default = "default_repeat_log_window_secs")]
+    pub repeat_log_window_secs: u64,
 }
 
 impl Default for LoggingConfig {
@@ -92,7 +93,7 @@ impl Default for LoggingConfig {
             log_directory: default_log_directory(),
             console_level: default_console_level(),
             file_level: default_file_level(),
-            quiet_prefixes: vec![],
+            repeat_log_window_secs: default_repeat_log_window_secs(),
         }
     }
 }
@@ -100,6 +101,7 @@ impl Default for LoggingConfig {
 fn default_log_directory() -> String { "/var/log/plex-hot-cache".to_string() }
 fn default_console_level() -> String { "info".to_string() }
 fn default_file_level() -> String { "debug".to_string() }
+fn default_repeat_log_window_secs() -> u64 { 60 }
 
 fn default_plex_db_path() -> String {
     "/var/lib/plexmediaserver/Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db".to_string()

@@ -88,7 +88,7 @@ async fn main() -> anyhow::Result<()> {
     // Open O_PATH fd to target BEFORE mounting FUSE over it
     let mut fs = fuse_fs::PlexHotCacheFs::new(&target)?;
     fs.passthrough_mode = config.cache.passthrough_mode;
-    fs.quiet_prefixes = config.logging.quiet_prefixes.clone();
+    fs.repeat_log_window = std::time::Duration::from_secs(config.logging.repeat_log_window_secs);
 
     // Set up SSD cache overlay.
     let cache_manager = Arc::new(cache::CacheManager::new(

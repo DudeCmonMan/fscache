@@ -6,7 +6,7 @@
 /// enqueues copy requests, and the copier task writes files into the cache dir.
 /// Subsequent reads through the FUSE mount are served from the SSD cache.
 mod common;
-use common::{write_backing_file, FuseHarness};
+use common::{write_backing_file, FuseHarness, OvermountHarness};
 use std::time::Duration;
 
 fn wait_for_pipeline() {
@@ -128,4 +128,64 @@ async fn pipeline_advances_lookahead_on_each_access() {
         h.cache_path().join("tv/Show/Show.S01E04.mkv").exists(),
         "E04 should be cached after accessing E02"
     );
+}
+
+/// True overmount E2E: FUSE is mounted ON TOP of the same directory the media
+/// files live in, exactly as in production.
+///
+/// Reading `dir/tv/Show/Show.S01E01.mkv` goes through the FUSE filesystem,
+/// which opens the real file via the pre-mount O_PATH fd underneath.  The
+/// access event triggers the predictor, which copies E02–E05 to the SSD cache.
+/// Subsequent reads of E02–E05 are served from the SSD cache — not from the
+/// underlying backing files.
+///
+/// This is the scenario Plex sees in production: it reads from `/mnt/media/...`
+/// unaware that FUSE is intercepting every syscall.
+#[tokio::test]
+async fn overmount_pipeline_caches_and_serves() {
+    let h = OvermountHarness::new(4, |dir| {
+        // All files must be written BEFORE the overmount — once FUSE is mounted
+        // over this path the directory appears read-only to normal file operations.
+        for i in 1..=5u32 {
+            let path = dir.join(format!("tv/Show/Show.S01E0{}.mkv", i));
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, format!("original content ep{}", i)).unwrap();
+        }
+    })
+    .unwrap();
+
+    // Allow FUSE to finish initialising before the first read.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Read E01 through the overmounted path — identical to Plex opening the file.
+    let data = tokio::fs::read(h.path().join("tv/Show/Show.S01E01.mkv"))
+        .await
+        .unwrap();
+    assert_eq!(data, b"original content ep1");
+
+    // Give the predictor and copier time to cache E02–E05.
+    tokio::time::sleep(Duration::from_millis(800)).await;
+
+    // Verify the cache directory contains the predicted episodes.
+    for i in 2..=5u32 {
+        let cached = h.cache_path().join(format!("tv/Show/Show.S01E0{}.mkv", i));
+        assert!(cached.exists(), "E0{} should be in the cache dir", i);
+        assert_eq!(
+            std::fs::read(&cached).unwrap(),
+            format!("original content ep{}", i).as_bytes(),
+        );
+    }
+
+    // Read E02–E05 through the overmounted path — served from the SSD cache.
+    for i in 2..=5u32 {
+        let data = tokio::fs::read(h.path().join(format!("tv/Show/Show.S01E0{}.mkv", i)))
+            .await
+            .unwrap();
+        assert_eq!(
+            data,
+            format!("original content ep{}", i).as_bytes(),
+            "E0{} read through overmount should return original content",
+            i
+        );
+    }
 }

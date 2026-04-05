@@ -92,6 +92,22 @@ impl PlexHotCacheFs {
 
     // ---- backing store helpers ----
 
+    /// Directories are never cached, so this naturally falls through to stat_backing for them.
+    fn stat_cached(&self, rel_path: &Path) -> Option<libc::stat> {
+        if self.passthrough_mode {
+            return None;
+        }
+        let cache = self.cache.as_ref()?;
+        if !cache.is_cached(rel_path) {
+            return None;
+        }
+        let cache_path = cache.cache_path(rel_path);
+        let c = path_to_cstring_abs(&cache_path);
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        let rc = unsafe { libc::lstat(c.as_ptr(), &mut stat) };
+        if rc == 0 { Some(stat) } else { None }
+    }
+
     fn stat_backing(&self, rel_path: &Path) -> Option<libc::stat> {
         let mut stat: libc::stat = unsafe { std::mem::zeroed() };
         let rc = if rel_path == Path::new("") {
@@ -109,19 +125,15 @@ impl PlexHotCacheFs {
     }
 
     fn stat_to_attr(&self, ino: u64, s: &libc::stat) -> FileAttr {
-        let kind = match s.st_mode & libc::S_IFMT {
-            libc::S_IFDIR => FileType::Directory,
-            libc::S_IFLNK => FileType::Symlink,
-            _ => FileType::RegularFile,
-        };
+        let kind = mode_to_filetype(s.st_mode);
         FileAttr {
             ino: INodeNo(ino),
             size: s.st_size as u64,
             blocks: s.st_blocks as u64,
-            atime: UNIX_EPOCH + Duration::from_secs(s.st_atime as u64),
-            mtime: UNIX_EPOCH + Duration::from_secs(s.st_mtime as u64),
-            ctime: UNIX_EPOCH + Duration::from_secs(s.st_ctime as u64),
-            crtime: UNIX_EPOCH,
+            atime: UNIX_EPOCH + Duration::new(s.st_atime as u64, s.st_atime_nsec as u32),
+            mtime: UNIX_EPOCH + Duration::new(s.st_mtime as u64, s.st_mtime_nsec as u32),
+            ctime: UNIX_EPOCH + Duration::new(s.st_ctime as u64, s.st_ctime_nsec as u32),
+            crtime: UNIX_EPOCH, // Linux doesn't expose birth time via stat(2); macOS-only field
             kind,
             perm: (s.st_mode & 0o7777) as u16,
             nlink: s.st_nlink as u32,
@@ -186,13 +198,16 @@ impl PlexHotCacheFs {
             };
 
             let kind = match unsafe { (*dirent).d_type } {
-                libc::DT_DIR => FileType::Directory,
-                libc::DT_LNK => FileType::Symlink,
-                libc::DT_UNKNOWN => match self.stat_backing(&child_path) {
-                    Some(s) if s.st_mode & libc::S_IFMT == libc::S_IFDIR => FileType::Directory,
-                    _ => FileType::RegularFile,
+                libc::DT_DIR  => FileType::Directory,
+                libc::DT_LNK  => FileType::Symlink,
+                libc::DT_BLK  => FileType::BlockDevice,
+                libc::DT_CHR  => FileType::CharDevice,
+                libc::DT_FIFO => FileType::NamedPipe,
+                libc::DT_SOCK => FileType::Socket,
+                libc::DT_UNKNOWN | _ => match self.stat_backing(&child_path) {
+                    Some(s) => mode_to_filetype(s.st_mode),
+                    None    => FileType::RegularFile,
                 },
-                _ => FileType::RegularFile,
             };
 
             let ino = self.inodes.lock().unwrap().get_or_create(&child_path);
@@ -232,7 +247,7 @@ impl Filesystem for PlexHotCacheFs {
             parent_path.join(name)
         };
 
-        let Some(stat) = self.stat_backing(&child_path) else {
+        let Some(stat) = self.stat_cached(&child_path).or_else(|| self.stat_backing(&child_path)) else {
             reply.error(Errno::ENOENT);
             return;
         };
@@ -251,7 +266,8 @@ impl Filesystem for PlexHotCacheFs {
             Some(p) => p.to_path_buf(),
             None => { reply.error(Errno::ENOENT); return; }
         };
-        let Some(stat) = self.stat_backing(&path) else {
+        // Avoids waking backing drives (spinning rust, NFS) for files already on SSD.
+        let Some(stat) = self.stat_cached(&path).or_else(|| self.stat_backing(&path)) else {
             reply.error(Errno::ENOENT);
             return;
         };
@@ -434,6 +450,60 @@ impl Filesystem for PlexHotCacheFs {
         unsafe { libc::close(fh.0 as RawFd) };
         reply.ok();
     }
+
+    fn readlink(&self, _req: &Request, ino: INodeNo, reply: ReplyData) {
+        let path = match self.inodes.lock().unwrap().get_path(ino.0) {
+            Some(p) => p.to_path_buf(),
+            None => { reply.error(Errno::ENOENT); return; }
+        };
+
+        let c_path = path_to_cstring(&path);
+        let mut buf = vec![0u8; libc::PATH_MAX as usize];
+        let len = unsafe {
+            libc::readlinkat(
+                self.backing_fd,
+                c_path.as_ptr(),
+                buf.as_mut_ptr() as *mut libc::c_char,
+                buf.len(),
+            )
+        };
+        if len < 0 {
+            reply.error(Errno::from_i32(last_errno()));
+        } else {
+            buf.truncate(len as usize);
+            reply.data(&buf);
+        }
+    }
+
+    fn statfs(&self, _req: &Request, _ino: INodeNo, reply: fuser::ReplyStatfs) {
+        // backing_fd is O_PATH and cannot be used with fstatvfs directly.
+        // Open a real fd to "." relative to the backing dir for the call.
+        let dot = CString::new(".").unwrap();
+        let real_fd = unsafe {
+            libc::openat(self.backing_fd, dot.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY)
+        };
+        if real_fd < 0 {
+            reply.error(Errno::from_i32(last_errno()));
+            return;
+        }
+        let mut buf: libc::statvfs = unsafe { std::mem::zeroed() };
+        let rc = unsafe { libc::fstatvfs(real_fd, &mut buf) };
+        unsafe { libc::close(real_fd) };
+        if rc != 0 {
+            reply.error(Errno::from_i32(last_errno()));
+            return;
+        }
+        reply.statfs(
+            buf.f_blocks,
+            buf.f_bfree,
+            buf.f_bavail,
+            buf.f_files,
+            buf.f_ffree,
+            buf.f_bsize as u32,
+            buf.f_namemax as u32,
+            buf.f_frsize as u32,
+        );
+    }
 }
 
 // ---- helpers ----
@@ -454,4 +524,16 @@ fn last_errno() -> libc::c_int {
     std::io::Error::last_os_error()
         .raw_os_error()
         .unwrap_or(libc::EIO)
+}
+
+fn mode_to_filetype(mode: libc::mode_t) -> FileType {
+    match mode & libc::S_IFMT {
+        libc::S_IFDIR  => FileType::Directory,
+        libc::S_IFLNK  => FileType::Symlink,
+        libc::S_IFBLK  => FileType::BlockDevice,
+        libc::S_IFCHR  => FileType::CharDevice,
+        libc::S_IFIFO  => FileType::NamedPipe,
+        libc::S_IFSOCK => FileType::Socket,
+        _              => FileType::RegularFile,
+    }
 }

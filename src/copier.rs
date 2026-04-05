@@ -39,6 +39,14 @@ pub fn copy_to_cache(backing_fd: RawFd, rel_path: &Path, cache_dest: &Path) -> s
     };
 
     let copy_result = copy_by_pread(src_fd, &mut dst_file);
+
+    let src_stat: Option<libc::stat> = if copy_result.is_ok() {
+        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstat(src_fd, &mut stat) } == 0 { Some(stat) } else { None }
+    } else {
+        None
+    };
+
     unsafe { libc::close(src_fd) };
 
     if let Err(e) = copy_result {
@@ -51,6 +59,22 @@ pub fn copy_to_cache(backing_fd: RawFd, rel_path: &Path, cache_dest: &Path) -> s
         return Err(e);
     }
     drop(dst_file);
+
+    // Best-effort: getattr serves metadata from the cached copy when available,
+    // so permissions and timestamps here are load-bearing, not just defensive.
+    if let Some(ref st) = src_stat {
+        if let Ok(c) = CString::new(partial.as_os_str().as_bytes()) {
+            unsafe {
+                libc::chmod(c.as_ptr(), st.st_mode & 0o7777);
+                libc::lchown(c.as_ptr(), st.st_uid, st.st_gid); // no-op if not root
+                let times = [
+                    libc::timespec { tv_sec: st.st_atime, tv_nsec: st.st_atime_nsec },
+                    libc::timespec { tv_sec: st.st_mtime, tv_nsec: st.st_mtime_nsec },
+                ];
+                libc::utimensat(libc::AT_FDCWD, c.as_ptr(), times.as_ptr(), 0);
+            }
+        }
+    }
 
     if let Err(e) = std::fs::rename(&partial, cache_dest) {
         let _ = std::fs::remove_file(&partial);

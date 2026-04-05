@@ -68,7 +68,9 @@ pub fn copy_to_cache(backing_fd: RawFd, rel_path: &Path, cache_dest: &Path) -> s
                 libc::chmod(c.as_ptr(), st.st_mode & 0o7777);
                 libc::lchown(c.as_ptr(), st.st_uid, st.st_gid); // no-op if not root
                 let times = [
-                    libc::timespec { tv_sec: st.st_atime, tv_nsec: st.st_atime_nsec },
+                    // atime = now so eviction uses cache-insertion time, not source age.
+                    // mtime = source so getattr presents consistent timestamps to clients.
+                    libc::timespec { tv_sec: 0, tv_nsec: libc::UTIME_NOW },
                     libc::timespec { tv_sec: st.st_mtime, tv_nsec: st.st_mtime_nsec },
                 ];
                 libc::utimensat(libc::AT_FDCWD, c.as_ptr(), times.as_ptr(), 0);

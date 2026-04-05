@@ -230,7 +230,6 @@ async fn predictor_caches_next_episodes_via_regex() {
     unsafe { libc::close(backing_fd) };
 }
 
-/// Predictor does not re-copy files already in the cache.
 #[tokio::test]
 async fn predictor_skips_already_cached() {
     let backing = TempDir::new().unwrap();
@@ -408,7 +407,6 @@ async fn regex_crosses_season_boundary_flat_layout() {
     unsafe { libc::close(backing_fd) };
 }
 
-/// copier::copy_to_cache correctly copies a file via backing_fd.
 #[test]
 fn copier_copies_file_correctly() {
     let backing = TempDir::new().unwrap();

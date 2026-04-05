@@ -87,7 +87,7 @@ impl CacheManager {
 
         let mut local = collect_cache_files(&self.cache_dir);
         local.retain(|entry| {
-            if let Some(age) = mtime_age(entry, now) {
+            if let Some(age) = atime_age(entry, now) {
                 if age > self.expiry {
                     let file_size = std::fs::metadata(entry).map(|m| m.len()).unwrap_or(0);
                     if let Err(e) = std::fs::remove_file(entry) {
@@ -209,9 +209,11 @@ fn collect_inner(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-fn mtime_age(path: &Path, now: SystemTime) -> Option<Duration> {
-    let mtime = std::fs::metadata(path).ok()?.modified().ok()?;
-    now.duration_since(mtime).ok()
+/// Age since last access. The copier preserves source mtime for getattr fidelity
+/// but sets atime to now, so atime reliably tracks cache insertion/use time.
+fn atime_age(path: &Path, now: SystemTime) -> Option<Duration> {
+    let atime = std::fs::metadata(path).ok()?.accessed().ok()?;
+    now.duration_since(atime).ok()
 }
 
 fn free_space_bytes(path: &Path) -> Option<u64> {

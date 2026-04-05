@@ -33,7 +33,6 @@ fn wait() {
 
 // ---- tests ----
 
-/// Cache miss: file exists only in backing store → FUSE returns backing content.
 #[test]
 fn cache_miss_serves_from_backing() {
     let h = FuseHarness::new_with_cache(1.0, 72).unwrap();
@@ -91,7 +90,6 @@ fn cache_transition_after_copy() {
     assert_eq!(data, b"cached content");
 }
 
-/// passthrough_mode = true bypasses the cache even when a cached file exists.
 #[test]
 fn passthrough_mode_bypasses_cache() {
     use plex_hot_cache::cache::CacheManager;
@@ -155,7 +153,6 @@ fn startup_cleanup_removes_partials() {
     assert!(cached.exists(), "complete cached file should survive startup_cleanup");
 }
 
-/// Size eviction: when total cache exceeds max_size_bytes, oldest files are removed.
 #[test]
 fn size_eviction_removes_oldest_files() {
     use plex_hot_cache::cache::CacheManager;
@@ -187,7 +184,6 @@ fn size_eviction_removes_oldest_files() {
     assert!(new_file.exists(), "newer file should survive");
 }
 
-/// Expiry eviction: a file older than expiry_hours is removed.
 #[test]
 fn expiry_eviction_removes_expired_files() {
     use plex_hot_cache::cache::CacheManager;
@@ -201,11 +197,11 @@ fn expiry_eviction_removes_expired_files() {
     std::fs::write(&expired, b"old data").unwrap();
     std::fs::write(&fresh, b"new data").unwrap();
 
-    // Back-date the mtime of `expired` to 2 hours ago.
+    // Back-date the atime of `expired` to 2 hours ago (eviction uses atime).
     let two_hours_ago = std::time::SystemTime::now()
         - std::time::Duration::from_secs(7200);
     let ft = filetime::FileTime::from_system_time(two_hours_ago);
-    filetime::set_file_mtime(&expired, ft).unwrap();
+    filetime::set_file_atime(&expired, ft).unwrap();
 
     // expiry = 1 hour → `expired` is past its window, `fresh` is not.
     let mgr = CacheManager::new(
@@ -219,4 +215,35 @@ fn expiry_eviction_removes_expired_files() {
 
     assert!(!expired.exists(), "expired file should be evicted");
     assert!(fresh.exists(), "fresh file should survive");
+}
+
+// Regression: a freshly cached file with an old source mtime must not be
+// immediately evicted.  The copier preserves source mtime for getattr fidelity
+// but sets atime=now; eviction must use atime, not mtime.
+#[test]
+fn freshly_cached_file_with_old_mtime_survives_eviction() {
+    use plex_hot_cache::cache::CacheManager;
+    use tempfile::TempDir;
+
+    let cache_dir = TempDir::new().unwrap();
+    let cached = cache_dir.path().join("episode.mkv");
+    std::fs::write(&cached, b"data").unwrap();
+
+    // Simulate the copier: set mtime to 6 months ago, leave atime as now.
+    let six_months_ago = std::time::SystemTime::now()
+        - std::time::Duration::from_secs(180 * 24 * 3600);
+    let ft = filetime::FileTime::from_system_time(six_months_ago);
+    filetime::set_file_mtime(&cached, ft).unwrap();
+
+    // expiry = 72 hours — file should survive because its atime is recent.
+    let mgr = CacheManager::new(
+        cache_dir.path().to_path_buf(),
+        cache_dir.path().to_path_buf(),
+        1.0,
+        72,
+        0.0,
+    );
+    mgr.evict_if_needed();
+
+    assert!(cached.exists(), "freshly cached file should not be evicted due to old source mtime");
 }

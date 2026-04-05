@@ -6,7 +6,6 @@ use std::time::Duration;
 
 // ---- Missing / nonexistent files ----
 
-/// Reading a nonexistent file through FUSE returns an error, not a panic.
 #[test]
 fn read_missing_file_returns_error() {
     let h = FuseHarness::new().unwrap();
@@ -14,7 +13,6 @@ fn read_missing_file_returns_error() {
     assert!(result.is_err(), "expected error for missing file, got Ok");
 }
 
-/// Stat a nonexistent file through FUSE returns an error, not a panic.
 #[test]
 fn stat_missing_file_returns_error() {
     let h = FuseHarness::new().unwrap();
@@ -53,7 +51,6 @@ fn concurrent_reads_return_correct_data() {
     }
 }
 
-/// Multiple threads reading different files simultaneously all get correct content.
 #[test]
 fn concurrent_reads_different_files() {
     let h = FuseHarness::new().unwrap();

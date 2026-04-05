@@ -51,43 +51,52 @@ Set via `trigger_strategy` in `config.toml`.
 
 ---
 
-## Setup
+## Quick Start
 
-### 1. Build
+### 1. Download and extract
 
-```bash
-cargo build --release
-sudo cp target/release/plex-hot-cache /usr/local/bin/
-```
-
-### 2. Config
+Grab the latest release from the [Releases page](https://github.com/DudeCmonMan/plex-hot-cache/releases) and extract it wherever you want to run it from:
 
 ```bash
-sudo mkdir /etc/plex-hot-cache
-sudo cp config.toml /etc/plex-hot-cache/config.toml
+tar -xzf plex-hot-cache-*.tar.gz -C /opt/plex-hot-cache
 ```
 
-Edit `/etc/plex-hot-cache/config.toml` — see the settings section below.
+The release includes the binary, a default `config.toml`, and the LICENSE.
 
-### 3. FUSE prerequisite
+### 2. Configure
 
-Allow non-root users (Plex) to access the mount:
+Edit `config.toml` in the same directory as the binary. At minimum, set two paths:
+
+```toml
+[paths]
+target_directory = "/mnt/media"      # your existing media directory that Plex reads from
+cache_directory  = "/mnt/ssd-cache"  # an SSD path for cached files
+```
+
+See the full [Settings](#settings) section below for all options.
+
+### 3. Allow FUSE access
+
+Plex runs as a different user, so it needs permission to access the FUSE mount:
 
 ```bash
 echo "user_allow_other" | sudo tee -a /etc/fuse.conf
 ```
 
-Or run the service as root (the default in the provided unit file).
+### 4. Run
 
-### 3a. You can "just go" from here
+```bash
+cd /opt/plex-hot-cache
+sudo ./plex-hot-cache
 ```
-sudo chmod plex-hot-cache
-sudo ./ plex-hot-cache
-```
 
-This will launch the server manually and it "just works". You can use this to see if you like how it behaves.
+That's it. The cache is active and Plex doesn't need any changes. Stop it with `Ctrl+C` — the mount detaches cleanly.
 
-### 4. systemd service
+---
+
+## Running with systemd (recommended)
+
+For a persistent setup that starts on boot:
 
 ```bash
 sudo cp plex-hot-cache.service /etc/systemd/system/
@@ -95,11 +104,24 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now plex-hot-cache
 ```
 
-To verify it's running and the mount is active:
+Verify it's running:
 
 ```bash
 systemctl status plex-hot-cache
 mount | grep plex-hot-cache
+```
+
+The service file is included in the release. If your media is on a network share, edit the unit to wait for the mount — see the comments inside `plex-hot-cache.service`.
+
+---
+
+## Building from source
+
+If you prefer to build it yourself:
+
+```bash
+cargo build --release
+sudo cp target/release/plex-hot-cache /usr/local/bin/
 ```
 
 ---

@@ -4,20 +4,28 @@ use std::time::{Duration, SystemTime};
 /// No persistent database — uses filesystem timestamps exclusively.
 pub struct CacheManager {
     cache_dir: PathBuf,
+    /// Root directory measured for global size budgeting. In single-mount mode
+    /// this equals `cache_dir`. In multi-mount mode this is the shared parent so
+    /// eviction respects the total budget across all mounts.
+    global_cache_dir: PathBuf,
     max_size_bytes: u64,
     expiry: Duration,
     min_free_bytes: u64,
 }
 
 impl CacheManager {
+    /// `cache_dir` is this mount's write directory; `global_cache_dir` is the
+    /// root measured for budget enforcement (pass `cache_dir.clone()` for
+    /// single-mount setups where local and global are the same).
     pub fn new(
         cache_dir: PathBuf,
+        global_cache_dir: PathBuf,
         max_size_gb: f64,
         expiry_hours: u64,
         min_free_space_gb: f64,
     ) -> Self {
         let configured = (max_size_gb * 1_073_741_824.0) as u64;
-        let max_size_bytes = match total_space_bytes(&cache_dir) {
+        let max_size_bytes = match total_space_bytes(&global_cache_dir) {
             Some(total) if configured == 0 || configured > total => {
                 let fallback = total / 2;
                 tracing::warn!(
@@ -32,6 +40,7 @@ impl CacheManager {
         };
         let cm = Self {
             cache_dir,
+            global_cache_dir,
             max_size_bytes,
             expiry: Duration::from_secs(expiry_hours * 3600),
             min_free_bytes: (min_free_space_gb * 1_073_741_824.0) as u64,
@@ -76,8 +85,8 @@ impl CacheManager {
         let mut size_count = 0u32;
         let mut reclaimed_bytes = 0u64;
 
-        let mut all = collect_cache_files(&self.cache_dir);
-        all.retain(|entry| {
+        let mut local = collect_cache_files(&self.cache_dir);
+        local.retain(|entry| {
             if let Some(age) = mtime_age(entry, now) {
                 if age > self.expiry {
                     let file_size = std::fs::metadata(entry).map(|m| m.len()).unwrap_or(0);
@@ -94,13 +103,14 @@ impl CacheManager {
             true
         });
 
-        let mut total: u64 = all
+        // Measure global total across all mounts to enforce the shared budget.
+        let mut global_total: u64 = collect_cache_files(&self.global_cache_dir)
             .iter()
             .filter_map(|p| std::fs::metadata(p).ok())
             .map(|m| m.len())
             .sum();
 
-        if total <= self.max_size_bytes {
+        if global_total <= self.max_size_bytes {
             if expiry_count > 0 {
                 tracing::info!(
                     "eviction complete: {} expired files removed ({:.1} MB reclaimed)",
@@ -111,14 +121,15 @@ impl CacheManager {
             return;
         }
 
-        all.sort_by_key(|p| {
+        // Global budget exceeded — evict oldest files from this mount's cache dir.
+        local.sort_by_key(|p| {
             std::fs::metadata(p)
                 .and_then(|m| m.accessed())
                 .unwrap_or(SystemTime::UNIX_EPOCH)
         });
 
-        for path in all {
-            if total <= self.max_size_bytes {
+        for path in local {
+            if global_total <= self.max_size_bytes {
                 break;
             }
             let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
@@ -128,7 +139,7 @@ impl CacheManager {
                 tracing::info!("evict (size limit): {}", path.display());
                 size_count += 1;
                 reclaimed_bytes += size;
-                total = total.saturating_sub(size);
+                global_total = global_total.saturating_sub(size);
             }
         }
 

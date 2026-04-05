@@ -61,6 +61,7 @@ impl FuseHarness {
         let mut fs = PlexHotCacheFs::new(backing.path())?;
         let cache_mgr = Arc::new(CacheManager::new(
             cache_dir.path().to_path_buf(),
+            cache_dir.path().to_path_buf(),
             max_size_gb,
             expiry_hours,
             0.0, // no min-free-space check in tests
@@ -108,6 +109,7 @@ impl FuseHarness {
         let backing_fd = fs.backing_fd;
 
         let cache_mgr = Arc::new(CacheManager::new(
+            cache_dir.path().to_path_buf(),
             cache_dir.path().to_path_buf(),
             1.0,
             72,
@@ -189,6 +191,7 @@ impl OvermountHarness {
         let backing_fd = fs.backing_fd;
 
         let cache_mgr = Arc::new(CacheManager::new(
+            cache_dir.path().to_path_buf(),
             cache_dir.path().to_path_buf(),
             1.0,
             72,
@@ -272,6 +275,7 @@ impl MultiFuseHarness {
             let mut fs = PlexHotCacheFs::new(backing.path())?;
             let cache_mgr = Arc::new(CacheManager::new(
                 cache_subdir,
+                shared_cache_base.path().to_path_buf(),
                 max_size_gb,
                 expiry_hours,
                 0.0,
@@ -301,6 +305,7 @@ impl MultiFuseHarness {
 
             let cache_mgr = Arc::new(CacheManager::new(
                 cache_subdir.clone(),
+                shared_cache_base.path().to_path_buf(),
                 1.0,
                 72,
                 0.0,

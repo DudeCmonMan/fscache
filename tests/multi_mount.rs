@@ -4,6 +4,7 @@ use std::time::Duration;
 use common::{
     MultiFuseHarness, write_multi_backing_file, read_multi_mount_file, collect_files,
 };
+use plex_hot_cache::utils::{mount_cache_name, validate_targets};
 
 // ---------------------------------------------------------------------------
 // Basic multi-mount operation
@@ -238,6 +239,62 @@ fn concurrent_reads_across_mounts() {
 }
 
 // ---------------------------------------------------------------------------
+// Global cache budget
+// ---------------------------------------------------------------------------
+
+#[test]
+fn global_eviction_respects_total_budget() {
+    use plex_hot_cache::cache::CacheManager;
+
+    // Two mounts sharing a 2 KB global budget.  Each file is ~600 bytes,
+    // so after writing 2 files to each mount (4 files total, ~2.4 KB) the
+    // global total exceeds the budget and eviction must trim below it.
+    let budget_bytes: u64 = 2048;
+    let budget_gb = budget_bytes as f64 / 1_073_741_824.0;
+
+    let harness = MultiFuseHarness::new_with_cache(2, budget_gb, 9999).unwrap();
+    let content = vec![b'x'; 600];
+
+    // Write files directly into each mount's cache subdir (bypassing FUSE copy
+    // pipeline — we just want to test the eviction math).
+    for mount_idx in 0..2usize {
+        let cache_dir = harness.cache_subdir(mount_idx);
+        for file_idx in 0..2u32 {
+            let path = cache_dir.join(format!("file{file_idx}.mkv"));
+            std::fs::write(&path, &content).unwrap();
+        }
+    }
+
+    let global_total: u64 = (0..2)
+        .flat_map(|i| collect_files(&harness.cache_subdir(i)))
+        .filter_map(|p| std::fs::metadata(&p).ok())
+        .map(|m| m.len())
+        .sum();
+    assert!(global_total > budget_bytes, "test setup: expected to exceed budget ({global_total} bytes)");
+
+    // Run eviction on mount 0's CacheManager (which knows the global dir).
+    // Re-create the manager with the same dirs and budget so we can call evict directly.
+    let mgr = CacheManager::new(
+        harness.cache_subdir(0),
+        harness.shared_cache_base.path().to_path_buf(),
+        budget_gb,
+        9999,
+        0.0,
+    );
+    mgr.evict_if_needed();
+
+    let after: u64 = (0..2)
+        .flat_map(|i| collect_files(&harness.cache_subdir(i)))
+        .filter_map(|p| std::fs::metadata(&p).ok())
+        .map(|m| m.len())
+        .sum();
+    assert!(
+        after <= budget_bytes,
+        "global total after eviction ({after} bytes) still exceeds budget ({budget_bytes} bytes)"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Shutdown
 // ---------------------------------------------------------------------------
 
@@ -248,7 +305,6 @@ fn all_sessions_drop_cleanly() {
         let harness = MultiFuseHarness::new_with_cache(3, 1.0, 72).unwrap();
         mount_paths = (0..3).map(|i| harness.mount_path(i).to_path_buf()).collect();
 
-        // Write and read through each mount to confirm they're active.
         for i in 0..3 {
             write_multi_backing_file(&harness, i, "test.mkv", b"data");
             assert_eq!(read_multi_mount_file(&harness, i, "test.mkv"), b"data");
@@ -260,4 +316,61 @@ fn all_sessions_drop_cleanly() {
     // accessible as FUSE mounts. We just verify no panic occurred during drop.
     // (TempDir removal would fail if a FUSE mount were still active.)
     drop(mount_paths);
+}
+
+// ---------------------------------------------------------------------------
+// Config validation and cache naming
+// ---------------------------------------------------------------------------
+
+#[test]
+fn mount_cache_name_same_basename_different_paths_are_distinct() {
+    let a = std::path::Path::new("/mnt/a/media");
+    let b = std::path::Path::new("/mnt/b/media");
+    let name_a = mount_cache_name(a);
+    let name_b = mount_cache_name(b);
+    assert_ne!(name_a, name_b, "same-basename paths must get distinct cache names");
+    // Both names should be human-readable (contain the basename).
+    assert!(name_a.contains("media"), "cache name should contain path component: {name_a}");
+    assert!(name_b.contains("media"), "cache name should contain path component: {name_b}");
+}
+
+#[test]
+fn mount_cache_name_same_path_is_stable() {
+    let p = std::path::Path::new("/mnt/nas1/movies");
+    assert_eq!(mount_cache_name(p), mount_cache_name(p));
+}
+
+#[test]
+fn same_basename_mounts_get_separate_cache_dirs() {
+    let parent_a = tempfile::TempDir::new().unwrap();
+    let parent_b = tempfile::TempDir::new().unwrap();
+    let dir_a = parent_a.path().join("media");
+    let dir_b = parent_b.path().join("media");
+    std::fs::create_dir_all(&dir_a).unwrap();
+    std::fs::create_dir_all(&dir_b).unwrap();
+
+    let name_a = mount_cache_name(&dir_a);
+    let name_b = mount_cache_name(&dir_b);
+    assert_ne!(name_a, name_b, "same-basename temp dirs must get distinct cache names");
+}
+
+#[test]
+fn duplicate_targets_are_rejected() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let targets = vec![dir.path().to_path_buf(), dir.path().to_path_buf()];
+    let err = validate_targets(&targets).unwrap_err();
+    assert!(err.to_string().contains("duplicate"), "expected duplicate error, got: {err}");
+}
+
+#[test]
+fn nonexistent_target_is_rejected() {
+    let targets = vec![std::path::PathBuf::from("/this/path/does/not/exist/ever")];
+    let err = validate_targets(&targets).unwrap_err();
+    assert!(err.to_string().contains("does not exist"), "expected not-found error, got: {err}");
+}
+
+#[test]
+fn empty_target_list_is_rejected() {
+    let err = validate_targets(&[]).unwrap_err();
+    assert!(err.to_string().contains("empty"), "expected empty-list error, got: {err}");
 }

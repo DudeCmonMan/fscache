@@ -75,19 +75,10 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("passthrough_mode = true — cache is bypassed, acting as pure proxy");
     }
 
-    if config.paths.target_directories.is_empty() {
-        anyhow::bail!("target_directories is empty — add at least one path");
-    }
-
-    // Validate all targets before mounting any of them.
     let targets: Vec<PathBuf> = config.paths.target_directories.iter()
         .map(|s| PathBuf::from(s))
         .collect();
-    for target in &targets {
-        if !target.exists() {
-            anyhow::bail!("target_directory does not exist: {}", target.display());
-        }
-    }
+    utils::validate_targets(&targets)?;
 
     let base_cache_dir = PathBuf::from(&config.paths.cache_directory);
     std::fs::create_dir_all(&base_cache_dir)?;
@@ -126,11 +117,8 @@ async fn main() -> anyhow::Result<()> {
     let mut mounts: Vec<MountHandle> = Vec::new();
 
     for target in &targets {
-        let mount_name = target
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("mount");
-        let mount_cache_dir = base_cache_dir.join(mount_name);
+        let mount_name = utils::mount_cache_name(target);
+        let mount_cache_dir = base_cache_dir.join(&mount_name);
         std::fs::create_dir_all(&mount_cache_dir)?;
 
         tracing::info!("[{}] Target: {}", mount_name, target.display());
@@ -144,7 +132,8 @@ async fn main() -> anyhow::Result<()> {
 
         let cache_manager = Arc::new(cache::CacheManager::new(
             mount_cache_dir.clone(),
-            config.cache.max_cache_per_mount_gb,
+            base_cache_dir.clone(),
+            config.cache.max_size_gb,
             config.cache.expiry_hours,
             config.cache.min_free_space_gb,
         ));

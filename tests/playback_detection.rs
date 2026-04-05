@@ -91,6 +91,42 @@ async fn zero_threshold_fires_immediately() {
     );
 }
 
+/// A process on the blocklist must never trigger prediction, even past the threshold.
+/// Uses `cat` as the blocked process — available on all Linux systems.
+#[tokio::test]
+async fn blocked_process_does_not_trigger_prediction() {
+    let threshold = Duration::from_secs(2);
+    let h = FuseHarness::new_full_pipeline_with_blocklist(
+        4, threshold, vec!["cat".to_string()]
+    ).unwrap();
+
+    for i in 1..=5u32 {
+        write_backing_file(&h, &format!("Show/Show.S01E0{}.mkv", i), b"episode data");
+    }
+    std::thread::sleep(Duration::from_millis(100));
+
+    // `cat` opens and reads the file through the FUSE mount. Because "cat" is on the
+    // blocklist, open() skips creating an OpenFileState — no prediction ever fires.
+    let ep_path = h.mount_path().join("Show/Show.S01E01.mkv");
+    let mut child = std::process::Command::new("cat")
+        .arg(&ep_path)
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let _ = child.wait();
+
+    // Wait well past the threshold to ensure no deferred event sneaks through.
+    tokio::time::sleep(threshold + Duration::from_secs(3)).await;
+
+    let cache_path = h.cache_path();
+    for i in 2..=5u32 {
+        assert!(
+            !cache_path.join(format!("Show/Show.S01E0{}.mkv", i)).exists(),
+            "E0{} must not be cached when opener is on the process blocklist", i
+        );
+    }
+}
+
 /// With CacheMissOnly strategy and non-zero threshold, reading a cached file past
 /// the threshold must NOT fire a prediction event (the handle is not tracked).
 #[tokio::test]

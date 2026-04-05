@@ -51,6 +51,9 @@ pub struct PlexHotCacheFs {
     /// Alternative to time: count bytes read per handle; useful if disk speed
     /// variability causes the time threshold to behave unexpectedly.
     pub playback_threshold: Duration,
+    /// Process binary names that are never allowed to trigger lookahead prediction.
+    /// Checked via /proc/<pid>/exe on each open(). Empty list = no blocking.
+    pub process_blocklist: Vec<String>,
     recent_logs: Mutex<HashMap<PathBuf, Instant>>,
     open_files: Mutex<HashMap<u64, OpenFileState>>,
 }
@@ -82,6 +85,7 @@ impl PlexHotCacheFs {
             repeat_log_window: Duration::from_secs(60),
             trigger_strategy: TriggerStrategy::CacheMissOnly,
             playback_threshold: Duration::ZERO,
+            process_blocklist: Vec::new(),
             recent_logs: Mutex::new(HashMap::new()),
             open_files: Mutex::new(HashMap::new()),
         })
@@ -242,6 +246,13 @@ impl Drop for PlexHotCacheFs {
     }
 }
 
+/// Returns the binary name of a process by reading /proc/<pid>/exe.
+/// Returns None if the process has exited or the link is unreadable.
+fn process_name(pid: u32) -> Option<String> {
+    let exe = std::fs::read_link(format!("/proc/{}/exe", pid)).ok()?;
+    exe.file_name()?.to_str().map(|s| s.to_string())
+}
+
 impl Filesystem for PlexHotCacheFs {
     fn init(&mut self, _req: &Request, _config: &mut KernelConfig) -> std::io::Result<()> {
         tracing::info!("FUSE filesystem initialized");
@@ -291,7 +302,7 @@ impl Filesystem for PlexHotCacheFs {
         reply.attr(&TTL, &self.stat_to_attr(ino.0, &stat));
     }
 
-    fn open(&self, _req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
+    fn open(&self, req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
         if flags.acc_mode() != fuser::OpenAccMode::O_RDONLY {
             reply.error(Errno::EACCES);
             return;
@@ -305,8 +316,15 @@ impl Filesystem for PlexHotCacheFs {
         let suppress = self.should_suppress_log(&path);
         let deferred = !self.playback_threshold.is_zero();
 
+        let blocked = !self.process_blocklist.is_empty() && process_name(req.pid())
+            .map(|name| self.process_blocklist.iter().any(|b| name == *b))
+            .unwrap_or(false);
+        if blocked {
+            tracing::debug!("process_blocklist: skipping prediction for pid {} on {:?}", req.pid(), path);
+        }
+
         // RollingBuffer immediate mode: fire event before the cache check.
-        if self.trigger_strategy == TriggerStrategy::RollingBuffer && !deferred {
+        if self.trigger_strategy == TriggerStrategy::RollingBuffer && !deferred && !blocked {
             if let Some(ref tx) = self.access_tx {
                 if suppress {
                     tracing::debug!("plex access: {:?}", path);
@@ -331,7 +349,7 @@ impl Filesystem for PlexHotCacheFs {
                         }
                         // RollingBuffer deferred: track cache-hit handles too so the
                         // predictor is notified once sustained playback is confirmed.
-                        if deferred && self.trigger_strategy == TriggerStrategy::RollingBuffer {
+                        if deferred && !blocked && self.trigger_strategy == TriggerStrategy::RollingBuffer {
                             self.open_files.lock().unwrap().insert(fd as u64, OpenFileState {
                                 path: path.clone(),
                                 opened_at: Instant::now(),
@@ -361,13 +379,13 @@ impl Filesystem for PlexHotCacheFs {
             tracing::info!("cache MISS: {:?} (serving from backing store)", path);
         }
 
-        if deferred {
+        if deferred && !blocked {
             self.open_files.lock().unwrap().insert(fd as u64, OpenFileState {
                 path: path.clone(),
                 opened_at: Instant::now(),
                 event_sent: false,
             });
-        } else if self.trigger_strategy == TriggerStrategy::CacheMissOnly {
+        } else if !blocked && self.trigger_strategy == TriggerStrategy::CacheMissOnly {
             // Immediate mode: notify predictor on miss — hits mean lookahead is working.
             if let Some(ref tx) = self.access_tx {
                 let _ = tx.send(AccessEvent { relative_path: path.clone() });

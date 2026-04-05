@@ -16,6 +16,9 @@ trigger_strategy = "cache-miss-only"     # "cache-miss-only" or "rolling-buffer"
 max_cache_pull_per_mount_gb = 0.0        # Per-mount lookahead prediction budget — how much to pull per drive per session (0 = unlimited)
 deferred_ttl_minutes = 1440             # Discard saved deferred events older than this on startup (default 24h)
 playback_threshold_secs = 10           # Seconds of active reading before triggering lookahead (0 = fire immediately on open)
+process_blocklist = ["Plex Media Scanner"]  # Process binary names never allowed to trigger lookahead (matched against /proc/<pid>/exe filename)
+                                            # "Plex Media Scanner" — safe to always block (handles intro/credit detection, never streams to users)
+                                            # "Plex Transcoder" — mixed results: still studying behavior, you need this for transcoded streams, don't add
 
 [schedule]
 cache_window_start = "08:00"             # Allowed caching window start (HH:MM, 24h)

@@ -133,6 +133,7 @@ async fn main() -> anyhow::Result<()> {
         fs.repeat_log_window = std::time::Duration::from_secs(config.logging.repeat_log_window_secs);
         fs.trigger_strategy = trigger_strategy;
         fs.playback_threshold = std::time::Duration::from_secs(config.cache.playback_threshold_secs);
+        fs.process_blocklist = config.cache.process_blocklist.clone();
 
         let cache_manager = Arc::new(cache::CacheManager::new(
             mount_cache_dir.clone(),

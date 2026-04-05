@@ -55,6 +55,11 @@ pub struct CacheConfig {
     /// Set to 0 to fire immediately on open() (legacy behavior, good for tests).
     #[serde(default)]
     pub playback_threshold_secs: u64,
+    /// Process binary names that must never trigger lookahead prediction.
+    /// Matched against the filename of /proc/<pid>/exe for the process opening the file.
+    /// Example: ["Plex Media Scanner", "Plex Transcoder"]
+    #[serde(default)]
+    pub process_blocklist: Vec<String>,
 }
 
 impl Default for CacheConfig {
@@ -69,6 +74,7 @@ impl Default for CacheConfig {
             max_cache_pull_per_mount_gb: 0.0,
             deferred_ttl_minutes: default_deferred_ttl_minutes(),
             playback_threshold_secs: 0,
+            process_blocklist: Vec::new(),
         }
     }
 }

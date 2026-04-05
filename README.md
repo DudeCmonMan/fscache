@@ -11,6 +11,14 @@ I created this binary for a few reasons:
     2) To improve the viewing experience for myself
     3) No other library really did what I wanted it to do (straightforward, simple setup, simple teardown,)
 
+## Now enhanced with Ratatui via --tui
+<table>                       
+<tr>                               
+<td><img width="758" height="822" alt="image" src="https://github.com/user-attachments/assets/993d9b19-d354-45a9-9961-7abf9d86cc44" /></td>
+<td><img width="758" height="822" alt="image" src="https://github.com/user-attachments/assets/c149cec9-6992-4323-91a8-fe4e80aeea74" /></td>
+</tr>
+</table>  
+
 # WARNING: PLEASE READ THIS BEFORE TRYING
 
 **This is a new project, I HIGHLY recommend you DISABLE automatic trash emptying in Plex while you are evaluating this software. Filesystem mounting / unmounting is potentially dangerous when running on a live server. If for some reason Plex detects that a drive went down and you clean up your trash automatically, it WILL delete your history (not the files, just Plex metadata). My codebase has extensive and automatic testing that protects against this type of failure, but please be safe. If you're using this tool, you might be hoarding data like me and I would HATE to see a critical bug break your metadata.**
@@ -91,6 +99,7 @@ sudo ./plex-hot-cache
 ```
 
 That's it. The cache is active and Plex doesn't need any changes. Stop it with `Ctrl+C` — the mount detaches cleanly.
+You can use argument --tui to run it with a GUI that shows you status and cache.
 
 ---
 

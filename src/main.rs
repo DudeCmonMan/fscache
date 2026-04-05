@@ -63,7 +63,6 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("plex-hot-cache {} starting", BUILD_VERSION);
     tracing::info!("Config: {}", config_path.display());
-    tracing::info!("Target: {}", config.paths.target_directory);
     tracing::info!("Cache:  {}", config.paths.cache_directory);
     tracing::info!(
         "Log directory: {} (console={}, file={})",
@@ -76,36 +75,28 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("passthrough_mode = true — cache is bypassed, acting as pure proxy");
     }
 
-    std::fs::create_dir_all(&config.paths.cache_directory)?;
-
-    let target = PathBuf::from(&config.paths.target_directory);
-    if !target.exists() {
-        anyhow::bail!("target_directory does not exist: {}", target.display());
+    if config.paths.target_directories.is_empty() {
+        anyhow::bail!("target_directories is empty — add at least one path");
     }
 
-    // Must open O_PATH fd BEFORE mounting FUSE over the target directory.
-    let mut fs = fuse_fs::PlexHotCacheFs::new(&target)?;
-    fs.passthrough_mode = config.cache.passthrough_mode;
-    fs.repeat_log_window = std::time::Duration::from_secs(config.logging.repeat_log_window_secs);
-    fs.trigger_strategy = match config.cache.trigger_strategy.as_str() {
+    // Validate all targets before mounting any of them.
+    let targets: Vec<PathBuf> = config.paths.target_directories.iter()
+        .map(|s| PathBuf::from(s))
+        .collect();
+    for target in &targets {
+        if !target.exists() {
+            anyhow::bail!("target_directory does not exist: {}", target.display());
+        }
+    }
+
+    let base_cache_dir = PathBuf::from(&config.paths.cache_directory);
+    std::fs::create_dir_all(&base_cache_dir)?;
+
+    let trigger_strategy = match config.cache.trigger_strategy.as_str() {
         "rolling-buffer" => fuse_fs::TriggerStrategy::RollingBuffer,
         _ => fuse_fs::TriggerStrategy::CacheMissOnly,
     };
     tracing::info!("Trigger strategy: {}", config.cache.trigger_strategy);
-
-    let cache_manager = Arc::new(cache::CacheManager::new(
-        PathBuf::from(&config.paths.cache_directory),
-        config.cache.max_size_gb,
-        config.cache.expiry_hours,
-        config.cache.min_free_space_gb,
-    ));
-    cache_manager.startup_cleanup();
-    fs.cache = Some(Arc::clone(&cache_manager));
-
-    let scheduler = scheduler::Scheduler::new(
-        &config.schedule.cache_window_start,
-        &config.schedule.cache_window_end,
-    )?;
     tracing::info!(
         "Schedule: caching allowed {} to {}",
         config.schedule.cache_window_start,
@@ -113,50 +104,10 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let plex_db_enabled = config.plex.enabled.unwrap_or(true);
-    let plex_db = if plex_db_enabled {
-        let db = plex_db::PlexDb::open(
-            std::path::Path::new(&config.plex.db_path),
-            &target,
-        ).ok();
-        if db.is_some() {
-            tracing::info!("Plex DB opened: {}", config.plex.db_path);
-        } else {
-            tracing::warn!("Plex DB not available at {}, using regex fallback", config.plex.db_path);
-        }
-        db
-    } else {
-        tracing::info!("Plex DB disabled, using regex-only mode");
-        None
-    };
-
-    let (access_tx, access_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (copy_tx, copy_rx) = tokio::sync::mpsc::channel::<predictor::CopyRequest>(64);
-
-    fs.access_tx = Some(access_tx);
-
-    let backing_fd = fs.backing_fd;
-    let max_cache_pull_bytes = (config.cache.max_cache_pull_gb * 1_073_741_824.0) as u64;
+    let max_cache_pull_bytes = (config.cache.max_cache_pull_per_mount_gb * 1_073_741_824.0) as u64;
     if max_cache_pull_bytes > 0 {
-        tracing::info!("Max cache pull budget: {:.1} GB", config.cache.max_cache_pull_gb);
+        tracing::info!("Max cache pull budget per mount: {:.1} GB", config.cache.max_cache_pull_per_mount_gb);
     }
-    let predictor_instance = predictor::Predictor::new(
-        access_rx,
-        copy_tx,
-        Arc::clone(&cache_manager),
-        config.cache.lookahead,
-        plex_db,
-        scheduler,
-        backing_fd,
-        max_cache_pull_bytes,
-        PathBuf::from(&config.paths.cache_directory),
-        config.cache.deferred_ttl_minutes,
-    );
-    tokio::spawn(predictor_instance.run());
-    tokio::spawn(predictor::run_copier_task(
-        backing_fd,
-        copy_rx,
-        Arc::clone(&cache_manager),
-    ));
 
     // SessionACL::All is equivalent to 'allow_other' — lets Plex (a different user)
     // access the FUSE mount. Requires either root or 'user_allow_other' in /etc/fuse.conf.
@@ -168,11 +119,89 @@ async fn main() -> anyhow::Result<()> {
     ];
     fuse_config.acl = SessionACL::All;
 
-    tracing::info!("Mounting FUSE over {}", target.display());
-    let _session = fuser::spawn_mount2(fs, &target, &fuse_config)
-        .map_err(|e| anyhow::anyhow!("FUSE mount failed: {e}\nHint: run as root or set 'user_allow_other' in /etc/fuse.conf"))?;
+    struct MountHandle {
+        _session: fuser::BackgroundSession,
+        target: PathBuf,
+    }
+    let mut mounts: Vec<MountHandle> = Vec::new();
 
-    tracing::info!("Mount active. Waiting for shutdown signal...");
+    for target in &targets {
+        let mount_name = target
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("mount");
+        let mount_cache_dir = base_cache_dir.join(mount_name);
+        std::fs::create_dir_all(&mount_cache_dir)?;
+
+        tracing::info!("[{}] Target: {}", mount_name, target.display());
+        tracing::info!("[{}] Cache:  {}", mount_name, mount_cache_dir.display());
+
+        // Must open O_PATH fd BEFORE mounting FUSE over the target directory.
+        let mut fs = fuse_fs::PlexHotCacheFs::new(target)?;
+        fs.passthrough_mode = config.cache.passthrough_mode;
+        fs.repeat_log_window = std::time::Duration::from_secs(config.logging.repeat_log_window_secs);
+        fs.trigger_strategy = trigger_strategy;
+
+        let cache_manager = Arc::new(cache::CacheManager::new(
+            mount_cache_dir.clone(),
+            config.cache.max_cache_per_mount_gb,
+            config.cache.expiry_hours,
+            config.cache.min_free_space_gb,
+        ));
+        cache_manager.startup_cleanup();
+        fs.cache = Some(Arc::clone(&cache_manager));
+
+        let plex_db = if plex_db_enabled {
+            let db = plex_db::PlexDb::open(
+                std::path::Path::new(&config.plex.db_path),
+                target,
+            ).ok();
+            if db.is_some() {
+                tracing::info!("[{}] Plex DB opened: {}", mount_name, config.plex.db_path);
+            } else {
+                tracing::warn!("[{}] Plex DB not available, using regex fallback", mount_name);
+            }
+            db
+        } else {
+            None
+        };
+
+        let (access_tx, access_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (copy_tx, copy_rx) = tokio::sync::mpsc::channel::<predictor::CopyRequest>(64);
+        fs.access_tx = Some(access_tx);
+
+        let backing_fd = fs.backing_fd;
+        let scheduler = scheduler::Scheduler::new(
+            &config.schedule.cache_window_start,
+            &config.schedule.cache_window_end,
+        )?;
+        let predictor_instance = predictor::Predictor::new(
+            access_rx,
+            copy_tx,
+            Arc::clone(&cache_manager),
+            config.cache.lookahead,
+            plex_db,
+            scheduler,
+            backing_fd,
+            max_cache_pull_bytes,
+            mount_cache_dir,
+            config.cache.deferred_ttl_minutes,
+        );
+        tokio::spawn(predictor_instance.run());
+        tokio::spawn(predictor::run_copier_task(
+            backing_fd,
+            copy_rx,
+            Arc::clone(&cache_manager),
+        ));
+
+        tracing::info!("[{}] Mounting FUSE over {}", mount_name, target.display());
+        let session = fuser::spawn_mount2(fs, target, &fuse_config)
+            .map_err(|e| anyhow::anyhow!("FUSE mount failed for {}: {e}\nHint: run as root or set 'user_allow_other' in /etc/fuse.conf", target.display()))?;
+
+        mounts.push(MountHandle { _session: session, target: target.clone() });
+    }
+
+    tracing::info!("{} mount(s) active. Waiting for shutdown signal...", mounts.len());
 
     let mut sigterm = tokio::signal::unix::signal(
         tokio::signal::unix::SignalKind::terminate(),
@@ -182,28 +211,32 @@ async fn main() -> anyhow::Result<()> {
         _ = sigterm.recv() => tracing::info!("Received SIGTERM"),
     }
 
-    // Lazy unmount: detach the mount point from the namespace immediately so
-    // no new opens arrive, but Plex's already-open file descriptors remain
-    // valid and in-progress streams continue uninterrupted.
-    tracing::info!("Lazy unmount of {} (existing streams unaffected)", target.display());
-    let status = std::process::Command::new("fusermount")
-        .args(["-uz", "--"])
-        .arg(&target)
-        .status();
-    match status {
-        Ok(s) if s.success() => tracing::info!("Lazy unmount succeeded"),
-        Ok(s) => tracing::warn!("fusermount -uz exited with {}", s),
-        Err(e) => {
-            tracing::warn!("fusermount not available ({}), trying umount -l", e);
-            let _ = std::process::Command::new("umount").arg("-l").arg(&target).status();
+    // Lazy unmount all: detach each mount point from the namespace immediately so
+    // no new opens arrive, but Plex's already-open file descriptors remain valid.
+    for mount in &mounts {
+        let mount_name = mount.target.file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("mount");
+        tracing::info!("[{}] Lazy unmount of {} (existing streams unaffected)", mount_name, mount.target.display());
+        let status = std::process::Command::new("fusermount")
+            .args(["-uz", "--"])
+            .arg(&mount.target)
+            .status();
+        match status {
+            Ok(s) if s.success() => tracing::info!("[{}] Lazy unmount succeeded", mount_name),
+            Ok(s) => tracing::warn!("[{}] fusermount -uz exited with {}", mount_name, s),
+            Err(e) => {
+                tracing::warn!("[{}] fusermount not available ({}), trying umount -l", mount_name, e);
+                let _ = std::process::Command::new("umount").arg("-l").arg(&mount.target).status();
+            }
         }
     }
 
     // Brief grace period for any in-flight FUSE reads to complete.
     tokio::time::sleep(std::time::Duration::from_secs(5)).await;
 
-    // _session drops here. The mount is already detached, so Drop is a no-op or benign.
-    drop(_session);
+    // Mounts are already detached, so Drop is a no-op or benign.
+    drop(mounts);
     tracing::info!("Shutdown complete.");
     Ok(())
 }

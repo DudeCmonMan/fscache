@@ -17,7 +17,7 @@ pub struct Config {
 
 #[derive(Debug, Deserialize)]
 pub struct PathsConfig {
-    pub target_directory: String,
+    pub target_directories: Vec<String>,
     pub cache_directory: String,
 }
 
@@ -31,8 +31,8 @@ pub struct PlexConfig {
 
 #[derive(Debug, Deserialize)]
 pub struct CacheConfig {
-    #[serde(default = "default_max_size_gb")]
-    pub max_size_gb: f64,
+    #[serde(default = "default_max_cache_per_mount_gb")]
+    pub max_cache_per_mount_gb: f64,
     #[serde(default = "default_lookahead")]
     pub lookahead: usize,
     #[serde(default = "default_expiry_hours")]
@@ -44,9 +44,9 @@ pub struct CacheConfig {
     /// When to notify the predictor. "cache-miss-only" (default) or "rolling-buffer".
     #[serde(default = "default_trigger_strategy")]
     pub trigger_strategy: String,
-    /// Total cache size budget enforced at prediction time (0.0 = unlimited).
+    /// Per-mount prediction cache budget (0.0 = unlimited).
     #[serde(default)]
-    pub max_cache_pull_gb: f64,
+    pub max_cache_pull_per_mount_gb: f64,
     /// Discard persisted deferred events older than this many minutes on startup (default 1440 = 24h).
     #[serde(default = "default_deferred_ttl_minutes")]
     pub deferred_ttl_minutes: u64,
@@ -55,13 +55,13 @@ pub struct CacheConfig {
 impl Default for CacheConfig {
     fn default() -> Self {
         Self {
-            max_size_gb: default_max_size_gb(),
+            max_cache_per_mount_gb: default_max_cache_per_mount_gb(),
             lookahead: default_lookahead(),
             expiry_hours: default_expiry_hours(),
             min_free_space_gb: default_min_free_space_gb(),
             passthrough_mode: false,
             trigger_strategy: default_trigger_strategy(),
-            max_cache_pull_gb: 0.0,
+            max_cache_pull_per_mount_gb: 0.0,
             deferred_ttl_minutes: default_deferred_ttl_minutes(),
         }
     }
@@ -120,7 +120,7 @@ fn default_plex_db_path() -> String {
 }
 fn default_trigger_strategy() -> String { "cache-miss-only".to_string() }
 fn default_deferred_ttl_minutes() -> u64 { 1440 }
-fn default_max_size_gb() -> f64 { 200.0 }
+fn default_max_cache_per_mount_gb() -> f64 { 200.0 }
 fn default_lookahead() -> usize { 4 }
 fn default_expiry_hours() -> u64 { 72 }
 fn default_min_free_space_gb() -> f64 { 10.0 }

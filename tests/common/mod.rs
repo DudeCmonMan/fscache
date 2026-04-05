@@ -27,7 +27,6 @@ fn test_fuse_config() -> fuser::Config {
 pub struct FuseHarness {
     /// The original source files live here — never touched by the FUSE fs.
     pub backing: TempDir,
-    /// The FUSE filesystem is mounted here — reads come from backing.
     pub mount: TempDir,
     /// Optional separate cache dir for cache overlay tests.
     pub cache: Option<TempDir>,
@@ -121,7 +120,6 @@ impl FuseHarness {
         let (copy_tx, copy_rx) = mpsc::channel::<CopyRequest>(64);
         fs.access_tx = Some(access_tx);
 
-        // Spawn predictor and copier on the current tokio runtime.
         let scheduler = Scheduler::new("00:00", "23:59").unwrap();
         let predictor = Predictor::new(
             access_rx,
@@ -228,7 +226,6 @@ impl OvermountHarness {
         ];
         config.acl = SessionACL::Owner;
 
-        // Overmount: FUSE is mounted on top of the same path the files live in.
         let session = fuser::spawn_mount2(fs, dir.path(), &config)?;
 
         Ok(Self {
@@ -249,7 +246,119 @@ impl OvermountHarness {
     }
 }
 
-/// Write a test file to the backing dir and return its path relative to the root.
+/// Multi-mount harness: N independent FUSE mounts sharing one cache base directory.
+///
+/// Each mount has its own backing dir, mount point, and cache subdirectory
+/// (`shared_cache_base/<index>/`).  All sessions are dropped at end of test.
+///
+/// Use `new_full_pipeline` when you need the predictor + copier wired up.
+pub struct MultiFuseHarness {
+    pub mounts: Vec<FuseHarness>,
+    /// Parent directory — each mount's cache lives at `shared_cache_base/<index>/`.
+    pub shared_cache_base: TempDir,
+}
+
+impl MultiFuseHarness {
+    /// Create `n` independent FUSE passthrough mounts sharing a cache base dir.
+    pub fn new_with_cache(n: usize, max_size_gb: f64, expiry_hours: u64) -> anyhow::Result<Self> {
+        let shared_cache_base = TempDir::new()?;
+        let mut mounts = Vec::with_capacity(n);
+        for i in 0..n {
+            let backing = TempDir::new()?;
+            let mount = TempDir::new()?;
+            let cache_subdir = shared_cache_base.path().join(i.to_string());
+            std::fs::create_dir_all(&cache_subdir)?;
+
+            let mut fs = PlexHotCacheFs::new(backing.path())?;
+            let cache_mgr = Arc::new(CacheManager::new(
+                cache_subdir,
+                max_size_gb,
+                expiry_hours,
+                0.0,
+            ));
+            cache_mgr.startup_cleanup();
+            fs.cache = Some(Arc::clone(&cache_mgr));
+
+            let session = fuser::spawn_mount2(fs, mount.path(), &test_fuse_config())?;
+            mounts.push(FuseHarness { backing, mount, cache: None, _session: session });
+        }
+        Ok(Self { mounts, shared_cache_base })
+    }
+
+    /// Create `n` independent full-pipeline mounts (FUSE + cache + predictor + copier).
+    /// Must be called from inside `#[tokio::test]`.
+    pub fn new_full_pipeline(n: usize, lookahead: usize) -> anyhow::Result<Self> {
+        let shared_cache_base = TempDir::new()?;
+        let mut mounts = Vec::with_capacity(n);
+        for i in 0..n {
+            let backing = TempDir::new()?;
+            let mount = TempDir::new()?;
+            let cache_subdir = shared_cache_base.path().join(i.to_string());
+            std::fs::create_dir_all(&cache_subdir)?;
+
+            let mut fs = PlexHotCacheFs::new(backing.path())?;
+            let backing_fd = fs.backing_fd;
+
+            let cache_mgr = Arc::new(CacheManager::new(
+                cache_subdir.clone(),
+                1.0,
+                72,
+                0.0,
+            ));
+            cache_mgr.startup_cleanup();
+            fs.cache = Some(Arc::clone(&cache_mgr));
+
+            let (access_tx, access_rx) = mpsc::unbounded_channel::<AccessEvent>();
+            let (copy_tx, copy_rx) = mpsc::channel::<CopyRequest>(64);
+            fs.access_tx = Some(access_tx);
+
+            let scheduler = Scheduler::new("00:00", "23:59").unwrap();
+            let predictor = Predictor::new(
+                access_rx,
+                copy_tx,
+                Arc::clone(&cache_mgr),
+                lookahead,
+                None,
+                scheduler,
+                backing_fd,
+                0,
+                cache_subdir,
+                0,
+            );
+            tokio::spawn(predictor.run());
+            tokio::spawn(run_copier_task(backing_fd, copy_rx, Arc::clone(&cache_mgr)));
+
+            let session = fuser::spawn_mount2(fs, mount.path(), &test_fuse_config())?;
+            mounts.push(FuseHarness { backing, mount, cache: None, _session: session });
+        }
+        Ok(Self { mounts, shared_cache_base })
+    }
+
+    pub fn backing_path(&self, idx: usize) -> &std::path::Path {
+        self.mounts[idx].backing.path()
+    }
+
+    pub fn mount_path(&self, idx: usize) -> &std::path::Path {
+        self.mounts[idx].mount.path()
+    }
+
+    pub fn cache_subdir(&self, idx: usize) -> std::path::PathBuf {
+        self.shared_cache_base.path().join(idx.to_string())
+    }
+}
+
+pub fn write_multi_backing_file(harness: &MultiFuseHarness, mount_idx: usize, rel: &str, content: &[u8]) {
+    let path = harness.backing_path(mount_idx).join(rel);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    std::fs::write(path, content).unwrap();
+}
+
+pub fn read_multi_mount_file(harness: &MultiFuseHarness, mount_idx: usize, rel: &str) -> Vec<u8> {
+    std::fs::read(harness.mount_path(mount_idx).join(rel)).unwrap()
+}
+
 pub fn write_backing_file(harness: &FuseHarness, rel: &str, content: &[u8]) {
     let path = harness.backing_path().join(rel);
     if let Some(parent) = path.parent() {
@@ -258,7 +367,6 @@ pub fn write_backing_file(harness: &FuseHarness, rel: &str, content: &[u8]) {
     std::fs::write(path, content).unwrap();
 }
 
-/// Read a file through the FUSE mount.
 pub fn read_mount_file(harness: &FuseHarness, rel: &str) -> Vec<u8> {
     std::fs::read(harness.mount_path().join(rel)).unwrap()
 }
@@ -271,7 +379,6 @@ pub fn file_hash(path: &Path) -> String {
     hex::encode(digest)
 }
 
-/// Recursively collect all file paths under a directory.
 pub fn collect_files(dir: &Path) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
     collect_files_inner(dir, &mut out);

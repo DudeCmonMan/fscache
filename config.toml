@@ -1,6 +1,7 @@
 [paths]
 target_directories = ["/mnt/media"]     # One or more directories to overmount (existing SMB/NFS mounts Plex reads from)
 cache_directory = "/mnt/ssd-cache"      # SSD cache storage (NOT the FUSE mount) — each target gets a subdirectory here
+instance_name = "plex-movies"           # Unique name for this instance — used for DB subfolder and process lock (alphanumeric, hyphens, underscores)
 
 [preset]
 name = "plex-episode-prediction"         # Preset to use: "plex-episode-prediction" or "cache-on-miss"

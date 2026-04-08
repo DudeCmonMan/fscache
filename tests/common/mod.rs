@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use fuser::{MountOption, SessionACL};
 use fscache::engine::action::{run_copier_task, AccessEvent, ActionEngine, CopyRequest};
+use fscache::cache::db::CacheDb;
 use fscache::cache::manager::CacheManager;
 use fscache::fuse::fusefs::FsCache;
 use fscache::preset::CachePreset;
@@ -61,8 +62,10 @@ impl FuseHarness {
         let cache_dir = TempDir::new()?;
 
         let mut fs = FsCache::new(backing.path())?;
+        let db = Arc::new(CacheDb::open(&cache_dir.path().join("test.db"))?);
         let cache_mgr = Arc::new(CacheManager::new(
             cache_dir.path().to_path_buf(),
+            db,
             cache_dir.path().to_path_buf(),
             max_size_gb,
             expiry_hours,
@@ -125,8 +128,10 @@ impl FuseHarness {
         let backing_store = Arc::clone(&fs.backing_store);
         fs.preset = Some(Arc::clone(&preset));
 
+        let db = Arc::new(CacheDb::open(&cache_dir.path().join("test.db"))?);
         let cache_mgr = Arc::new(CacheManager::new(
             cache_dir.path().to_path_buf(),
+            db,
             cache_dir.path().to_path_buf(),
             1.0,
             72,
@@ -210,8 +215,10 @@ impl OvermountHarness {
         let preset = Arc::new(PlexEpisodePrediction::new(lookahead, vec![], false));
         fs.preset = Some(Arc::clone(&preset) as Arc<dyn CachePreset>);
 
+        let db = Arc::new(CacheDb::open(&cache_dir.path().join("test.db"))?);
         let cache_mgr = Arc::new(CacheManager::new(
             cache_dir.path().to_path_buf(),
+            db,
             cache_dir.path().to_path_buf(),
             1.0,
             72,
@@ -285,6 +292,7 @@ impl MultiFuseHarness {
     /// Create `n` independent FUSE passthrough mounts sharing a cache base dir.
     pub fn new_with_cache(n: usize, max_size_gb: f64, expiry_hours: u64) -> anyhow::Result<Self> {
         let shared_cache_base = TempDir::new()?;
+        let shared_db = Arc::new(CacheDb::open(&shared_cache_base.path().join("test.db"))?);
         let mut mounts = Vec::with_capacity(n);
         for i in 0..n {
             let backing = TempDir::new()?;
@@ -295,6 +303,7 @@ impl MultiFuseHarness {
             let mut fs = FsCache::new(backing.path())?;
             let cache_mgr = Arc::new(CacheManager::new(
                 cache_subdir,
+                Arc::clone(&shared_db),
                 shared_cache_base.path().to_path_buf(),
                 max_size_gb,
                 expiry_hours,
@@ -313,6 +322,7 @@ impl MultiFuseHarness {
     /// Must be called from inside `#[tokio::test]`.
     pub fn new_full_pipeline(n: usize, lookahead: usize) -> anyhow::Result<Self> {
         let shared_cache_base = TempDir::new()?;
+        let shared_db = Arc::new(CacheDb::open(&shared_cache_base.path().join("test.db"))?);
         let mut mounts = Vec::with_capacity(n);
         for i in 0..n {
             let backing = TempDir::new()?;
@@ -328,6 +338,7 @@ impl MultiFuseHarness {
 
             let cache_mgr = Arc::new(CacheManager::new(
                 cache_subdir.clone(),
+                Arc::clone(&shared_db),
                 shared_cache_base.path().to_path_buf(),
                 1.0,
                 72,

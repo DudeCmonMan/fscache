@@ -91,6 +91,7 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("fscache {} starting", BUILD_VERSION);
     tracing::info!("Config: {}", config_path.display());
     tracing::info!("Cache:  {}", config.paths.cache_directory);
+    tracing::info!("Instance: {}", config.paths.instance_name);
     tracing::info!(
         "Log directory: {} (console={}, file={})",
         config.logging.log_directory,
@@ -102,6 +103,10 @@ async fn main() -> anyhow::Result<()> {
         tracing::warn!("passthrough_mode = true — cache is bypassed, acting as pure proxy");
     }
 
+    // Acquire instance lock before touching the filesystem so two daemons with the
+    // same instance_name fail fast (kernel releases the lock on exit or crash).
+    let _instance_lock = utils::acquire_instance_lock(&config.paths.instance_name)?;
+
     let targets: Vec<PathBuf> = config.paths.target_directories.iter()
         .map(|s| PathBuf::from(s))
         .collect();
@@ -109,6 +114,26 @@ async fn main() -> anyhow::Result<()> {
 
     let base_cache_dir = PathBuf::from(&config.paths.cache_directory);
     std::fs::create_dir_all(&base_cache_dir)?;
+
+    let instance_name = &config.paths.instance_name;
+    let instance_db_dir = base_cache_dir.join("db").join(instance_name);
+    std::fs::create_dir_all(&instance_db_dir)?;
+    let db_path = instance_db_dir.join(format!("{instance_name}.db"));
+    tracing::info!("Database: {}", db_path.display());
+
+    let legacy_db = base_cache_dir.join("fscache.db");
+    if legacy_db.exists() {
+        tracing::warn!(
+            "Found legacy database at {} — move it to {} to preserve cache history",
+            legacy_db.display(),
+            db_path.display()
+        );
+    }
+
+    let db = Arc::new(cache::db::CacheDb::open(&db_path).unwrap_or_else(|e| {
+        tracing::warn!("failed to open cache DB {}: {e} — falling back to in-memory DB", db_path.display());
+        cache::db::CacheDb::open(std::path::Path::new(":memory:")).expect("in-memory DB must open")
+    }));
 
     tracing::info!(
         "Schedule: caching allowed {} to {}",
@@ -127,7 +152,7 @@ async fn main() -> anyhow::Result<()> {
     fuse_config.mount_options = vec![
         MountOption::RO,
         MountOption::AutoUnmount,
-        MountOption::FSName("fscache".to_string()),
+        MountOption::FSName(format!("fscache-{}", config.paths.instance_name)),
     ];
     fuse_config.acl = SessionACL::All;
 
@@ -137,8 +162,28 @@ async fn main() -> anyhow::Result<()> {
     }
     let mut mounts: Vec<MountHandle> = Vec::new();
     let mut cache_managers: Vec<Arc<cache::manager::CacheManager>> = Vec::new();
+    // Per-target lock files held for process lifetime — kernel releases on exit/crash.
+    let mut _target_locks: Vec<std::fs::File> = Vec::new();
 
     for target in &targets {
+        // Clean up a stale mount left by a previous crash of this same instance.
+        // Safe because: we hold the instance lock (previous process is dead) and
+        // the FSName matches our instance (not another live instance's mount).
+        if let Some(holder) = utils::find_fscache_mount_holder(target) {
+            if holder == config.paths.instance_name {
+                tracing::warn!(
+                    "Stale mount detected on {} from previous crash — cleaning up",
+                    target.display()
+                );
+                let _ = std::process::Command::new("fusermount")
+                    .args(["-uz", "--"])
+                    .arg(target)
+                    .status();
+            }
+        }
+
+        let target_lock = utils::acquire_target_lock(target)?;
+        _target_locks.push(target_lock);
         let mount_name = utils::mount_cache_name(target);
         let mount_cache_dir = base_cache_dir.join(&mount_name);
         std::fs::create_dir_all(&mount_cache_dir)?;
@@ -179,6 +224,7 @@ async fn main() -> anyhow::Result<()> {
 
         let cache_manager = Arc::new(cache::manager::CacheManager::new(
             mount_cache_dir.clone(),
+            Arc::clone(&db),
             base_cache_dir.clone(),
             config.cache.max_size_gb,
             config.cache.expiry_hours,

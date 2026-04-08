@@ -1,6 +1,8 @@
 mod common;
 use common::{write_backing_file, FuseHarness};
 use std::path::PathBuf;
+use std::sync::Arc;
+use fscache::cache::db::CacheDb;
 
 // ---- helpers ----
 
@@ -110,8 +112,10 @@ fn passthrough_mode_bypasses_cache() {
 
     let mut fs = FsCache::new(backing.path()).unwrap();
     fs.passthrough_mode = true; // bypass cache
-    fs.cache = Some(std::sync::Arc::new(CacheManager::new(
+    let db = Arc::new(CacheDb::open(&cache_dir.path().join("test.db")).unwrap());
+    fs.cache = Some(Arc::new(CacheManager::new(
         cache_dir.path().to_path_buf(),
+        db,
         cache_dir.path().to_path_buf(),
         1.0,
         72,
@@ -146,7 +150,8 @@ fn startup_cleanup_removes_partials() {
     let cached = cache_dir.path().join("movies").join("film2.mkv");
     std::fs::write(&cached, b"complete").unwrap();
 
-    let mgr = CacheManager::new(cache_dir.path().to_path_buf(), cache_dir.path().to_path_buf(), 1.0, 72, 0.0);
+    let db = Arc::new(CacheDb::open(&cache_dir.path().join("test.db")).unwrap());
+    let mgr = CacheManager::new(cache_dir.path().to_path_buf(), db, cache_dir.path().to_path_buf(), 1.0, 72, 0.0);
     mgr.startup_cleanup();
 
     assert!(!partial.exists(), ".partial file should have been removed by startup_cleanup");
@@ -168,8 +173,10 @@ fn size_eviction_removes_oldest_files() {
     std::fs::write(&new_file, vec![0u8; 600]).unwrap();
 
     // Max ~955 bytes (1000 / 1_073_741_824 GB), expiry = 9999 hours (never expires).
+    let db = Arc::new(CacheDb::open(&cache_dir.path().join("test.db")).unwrap());
     let mgr = CacheManager::new(
         cache_dir.path().to_path_buf(),
+        db,
         cache_dir.path().to_path_buf(),
         1000.0 / 1_073_741_824.0,
         9999,
@@ -210,8 +217,10 @@ fn expiry_eviction_removes_expired_files() {
     std::fs::write(&fresh, b"new data").unwrap();
 
     // expiry = 1 hour → `expired` (2 hours ago) is past its window, `fresh` is not.
+    let cache_db = Arc::new(CacheDb::open(&cache_dir.path().join("test.db")).unwrap());
     let mgr = CacheManager::new(
         cache_dir.path().to_path_buf(),
+        Arc::clone(&cache_db),
         cache_dir.path().to_path_buf(),
         1.0,
         1, // 1 hour expiry
@@ -249,8 +258,10 @@ fn freshly_cached_file_with_old_mtime_survives_eviction() {
     std::fs::write(&cached, b"data").unwrap();
 
     // expiry = 72 hours — file was just registered (last_hit_at = now) so it should survive.
+    let db = Arc::new(CacheDb::open(&cache_dir.path().join("test.db")).unwrap());
     let mgr = CacheManager::new(
         cache_dir.path().to_path_buf(),
+        db,
         cache_dir.path().to_path_buf(),
         1.0,
         72,

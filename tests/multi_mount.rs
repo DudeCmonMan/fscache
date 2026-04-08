@@ -1,9 +1,11 @@
 mod common;
 
+use std::sync::Arc;
 use std::time::Duration;
 use common::{
     MultiFuseHarness, write_multi_backing_file, read_multi_mount_file, collect_files,
 };
+use fscache::cache::db::CacheDb;
 use fscache::utils::{mount_cache_name, validate_targets};
 
 // ---------------------------------------------------------------------------
@@ -273,9 +275,11 @@ fn global_eviction_respects_total_budget() {
     assert!(global_total > budget_bytes, "test setup: expected to exceed budget ({global_total} bytes)");
 
     // Re-create the manager with the same dirs and budget so we can call evict directly.
-    // Mount 0 manager shares the DB (same global_cache_dir) with mount 1's manager.
+    // Both managers share the same DB (same shared_cache_base) for global budget tracking.
+    let shared_db = Arc::new(CacheDb::open(&harness.shared_cache_base.path().join("test.db")).unwrap());
     let mgr0 = CacheManager::new(
         harness.cache_subdir(0),
+        Arc::clone(&shared_db),
         harness.shared_cache_base.path().to_path_buf(),
         budget_gb,
         9999,
@@ -283,6 +287,7 @@ fn global_eviction_respects_total_budget() {
     );
     let mgr1 = CacheManager::new(
         harness.cache_subdir(1),
+        Arc::clone(&shared_db),
         harness.shared_cache_base.path().to_path_buf(),
         budget_gb,
         9999,

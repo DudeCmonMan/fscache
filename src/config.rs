@@ -21,6 +21,9 @@ pub struct Config {
 pub struct PathsConfig {
     pub target_directories: Vec<String>,
     pub cache_directory: String,
+    /// Unique name for this instance — used as the DB subfolder name and process lock name.
+    /// Must be non-empty and contain only alphanumeric characters, hyphens, or underscores.
+    pub instance_name: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -166,6 +169,23 @@ fn de_u64<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
     }
 }
 
+fn validate_instance_name(name: &str) -> anyhow::Result<()> {
+    if name.trim().is_empty() {
+        anyhow::bail!(
+            "paths.instance_name is required — choose a unique name for this instance \
+             (e.g. instance_name = \"plex-movies\")"
+        );
+    }
+    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        anyhow::bail!(
+            "paths.instance_name {:?} contains invalid characters — \
+             use only alphanumeric characters, hyphens, or underscores",
+            name
+        );
+    }
+    Ok(())
+}
+
 pub fn load() -> anyhow::Result<(Config, PathBuf)> {
     let path = crate::utils::find_file_near_binary("config.toml")?;
     load_from(&path).map(|(cfg, _)| (cfg, path.clone()))
@@ -176,5 +196,6 @@ pub fn load_from(path: &PathBuf) -> anyhow::Result<(Config, PathBuf)> {
         .with_context(|| format!("failed to read {}", path.display()))?;
     let config: Config = toml::from_str(&content)
         .with_context(|| format!("failed to parse {}", path.display()))?;
+    validate_instance_name(&config.paths.instance_name)?;
     Ok((config, path.clone()))
 }

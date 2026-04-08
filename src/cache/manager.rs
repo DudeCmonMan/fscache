@@ -30,23 +30,23 @@ pub struct CacheManager {
     min_free_bytes: u64,
     /// Unique identifier for this mount's cache partition within the shared DB.
     mount_id: String,
-    /// Shared SQLite database for cache metadata, eviction tracking, and deferred events.
     db: Arc<CacheDb>,
 }
 
 impl CacheManager {
-    /// `cache_dir` is this mount's write directory; `global_cache_dir` is the shared
-    /// cache root used for DB placement and drive capacity checks (pass `cache_dir.clone()`
-    /// for single-mount setups).
+    /// `cache_dir` is this mount's write directory.
+    /// `db` is the shared instance-level database (opened once in main, shared across mounts).
+    /// `capacity_check_dir` is used for drive capacity checks — typically the cache root.
     pub fn new(
         cache_dir: PathBuf,
-        global_cache_dir: PathBuf,
+        db: Arc<CacheDb>,
+        capacity_check_dir: PathBuf,
         max_size_gb: f64,
         expiry_hours: u64,
         min_free_space_gb: f64,
     ) -> Self {
         let configured = (max_size_gb * 1_073_741_824.0) as u64;
-        let max_size_bytes = match total_space_bytes(&global_cache_dir) {
+        let max_size_bytes = match total_space_bytes(&capacity_check_dir) {
             Some(total) if configured == 0 || configured > total => {
                 let fallback = total / 2;
                 tracing::warn!(
@@ -59,13 +59,6 @@ impl CacheManager {
             }
             _ => configured,
         };
-
-        // Open the shared DB in the global cache root so all mounts use the same file.
-        let db_path = global_cache_dir.join("fscache.db");
-        let db = Arc::new(CacheDb::open(&db_path).unwrap_or_else(|e| {
-            tracing::warn!("failed to open cache DB {}: {e} — falling back to no-op DB", db_path.display());
-            CacheDb::open(std::path::Path::new(":memory:")).expect("in-memory DB must open")
-        }));
 
         let mount_id = cache_dir.to_string_lossy().into_owned();
 

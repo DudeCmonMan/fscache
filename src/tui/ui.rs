@@ -161,17 +161,17 @@ fn render_predictor(f: &mut Frame, area: Rect, state: &DashboardState) {
     let deferred  = state.deferred_count.load(Relaxed);
     let b_used    = state.budget_used_bytes.load(Relaxed);
     let b_max     = state.budget_max_bytes.load(Relaxed);
-    let strategy  = state.trigger_strategy.lock().unwrap().clone();
+    let preset    = state.preset_name.lock().unwrap().clone();
 
     let budget_str = if b_max > 0 {
         format!("Budget: {:.1} / {:.1} GB", gb(b_used), gb(b_max))
     } else {
         "Budget: unlimited".to_string()
     };
-    let strategy_str = if strategy.is_empty() { "—".to_string() } else { strategy };
-    let text = format!(" In-flight: {}   Deferred: {}   {}   Strategy: {}", in_flight, deferred, budget_str, strategy_str);
+    let preset_str = if preset.is_empty() { "—".to_string() } else { preset };
+    let text = format!(" In-flight: {}   Deferred: {}   {}   Preset: {}", in_flight, deferred, budget_str, preset_str);
     f.render_widget(
-        Paragraph::new(text).block(Block::default().borders(Borders::ALL).title(" Predictor ")),
+        Paragraph::new(text).block(Block::default().borders(Borders::ALL).title(" Action Engine ")),
         area,
     );
 }
@@ -196,13 +196,15 @@ fn render_mounts(f: &mut Frame, area: Rect, state: &DashboardState) {
 }
 
 fn render_activity(f: &mut Frame, area: Rect, state: &DashboardState) {
-    let opens   = state.fuse_opens.load(Relaxed);
-    let hits    = state.cache_hits.load(Relaxed);
-    let misses  = state.cache_misses.load(Relaxed);
-    let bytes   = state.bytes_read.load(Relaxed);
-    let handles = state.open_handles.load(Relaxed);
-    let done    = state.completed_copies.load(Relaxed);
-    let failed  = state.failed_copies.load(Relaxed);
+    let opens    = state.fuse_opens.load(Relaxed);
+    let hits     = state.cache_hits.load(Relaxed);
+    let misses   = state.cache_misses.load(Relaxed);
+    let bytes    = state.bytes_read.load(Relaxed);
+    let handles  = state.open_handles.load(Relaxed);
+    let done     = state.completed_copies.load(Relaxed);
+    let failed   = state.failed_copies.load(Relaxed);
+    let ev_exp   = state.evictions_expired.load(Relaxed);
+    let ev_size  = state.evictions_size.load(Relaxed);
 
     let hit_rate = {
         let total = hits + misses;
@@ -216,6 +218,9 @@ fn render_activity(f: &mut Frame, area: Rect, state: &DashboardState) {
         Line::from(""),
         Line::from(format!(" Copies")),
         Line::from(format!("   Completed: {}   Failed: {}", done, failed)),
+        Line::from(""),
+        Line::from(format!(" Evictions")),
+        Line::from(format!("   Expired: {}   Size-limit: {}", ev_exp, ev_size)),
     ];
 
     let active_copies = state.active_copies.lock().unwrap();
@@ -272,17 +277,17 @@ fn render_cache(f: &mut Frame, area: Rect, state: &DashboardState, sel: usize, s
 fn sorted_files(state: &DashboardState, sort: CacheSort) -> Vec<super::state::CachedFileInfo> {
     let mut files = state.cached_files.lock().unwrap().iter().map(|f| {
         super::state::CachedFileInfo {
-            path:      f.path.clone(),
-            size_bytes: f.size_bytes,
-            atime:     f.atime,
-            mtime:     f.mtime,
-            evicts_at: f.evicts_at,
+            path:        f.path.clone(),
+            size_bytes:  f.size_bytes,
+            cached_at:   f.cached_at,
+            last_hit_at: f.last_hit_at,
+            evicts_at:   f.evicts_at,
         }
     }).collect::<Vec<_>>();
 
     match sort {
-        CacheSort::Newest   => files.sort_by(|a, b| b.atime.cmp(&a.atime)),
-        CacheSort::Oldest   => files.sort_by(|a, b| a.atime.cmp(&b.atime)),
+        CacheSort::Newest   => files.sort_by(|a, b| b.cached_at.cmp(&a.cached_at)),
+        CacheSort::Oldest   => files.sort_by(|a, b| a.cached_at.cmp(&b.cached_at)),
         CacheSort::Largest  => files.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes)),
         CacheSort::Smallest => files.sort_by(|a, b| a.size_bytes.cmp(&b.size_bytes)),
         CacheSort::NameAz   => files.sort_by(|a, b| a.path.cmp(&b.path)),
@@ -314,7 +319,7 @@ fn render_cache_list(f: &mut Frame, area: Rect, files: &[super::state::CachedFil
         let marker = if i == sel { "▸ " } else { "  " };
         let name = format!("{}{}", marker, f.path.display());
         let size = fmt_bytes(f.size_bytes);
-        let cached_at = fmt_time(f.atime);
+        let cached_at = fmt_time(f.cached_at);
         let evicts_in = fmt_duration_until(f.evicts_at);
         let style = if i == sel {
             Style::default().bg(Color::DarkGray)
@@ -350,8 +355,8 @@ fn render_cache_detail(f: &mut Frame, area: Rect, files: &[super::state::CachedF
             Line::from(format!(" File:       {}", f.path.display())),
             Line::from(format!(" Mount:      {}", mount)),
             Line::from(format!(" Size:       {}", fmt_bytes(f.size_bytes))),
-            Line::from(format!(" Cached at:  {}  ({})", fmt_datetime(f.atime), fmt_relative(f.atime))),
-            Line::from(format!(" Last read:  {}  ({})", fmt_datetime(f.atime), fmt_relative(f.atime))),
+            Line::from(format!(" Cached at:  {}  ({})", fmt_datetime(f.cached_at), fmt_relative(f.cached_at))),
+            Line::from(format!(" Last read:  {}  ({})", fmt_datetime(f.last_hit_at), fmt_relative(f.last_hit_at))),
             Line::from(format!(" Evicts in:  {}  ({})", fmt_duration_until(f.evicts_at), fmt_datetime(f.evicts_at))),
             Line::from(format!(" Cache path: {}", cache_path)),
         ]
@@ -404,25 +409,21 @@ fn fmt_bytes(bytes: u64) -> String {
 }
 
 pub(super) fn fmt_time(t: SystemTime) -> String {
-    let secs = t.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs();
-    let h = (secs % 86400) / 3600;
-    let m = (secs % 3600) / 60;
-    let s = secs % 60;
-    format!("{:02}:{:02}:{:02}", h, m, s)
+    let secs = t.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs() as libc::time_t;
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    unsafe { libc::localtime_r(&secs, &mut tm) };
+    format!("{:02}:{:02}:{:02}", tm.tm_hour, tm.tm_min, tm.tm_sec)
 }
 
 fn fmt_datetime(t: SystemTime) -> String {
-    let secs = t.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs();
-    let days = secs / 86400;
-    // Approximate Y-M-D from epoch days — avoids a chrono dependency.
-    let year = 1970 + days / 365;
-    let day_of_year = days % 365;
-    let month = day_of_year / 30 + 1;
-    let day = day_of_year % 30 + 1;
-    let h = (secs % 86400) / 3600;
-    let mi = (secs % 3600) / 60;
-    let s = secs % 60;
-    format!("{:04}-{:02}-{:02} {:02}:{:02}:{:02}", year, month.min(12), day.min(31), h, mi, s)
+    let secs = t.duration_since(SystemTime::UNIX_EPOCH).unwrap_or_default().as_secs() as libc::time_t;
+    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+    unsafe { libc::localtime_r(&secs, &mut tm) };
+    format!(
+        "{:04}-{:02}-{:02} {:02}:{:02}:{:02}",
+        tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday,
+        tm.tm_hour, tm.tm_min, tm.tm_sec,
+    )
 }
 
 fn fmt_relative(t: SystemTime) -> String {

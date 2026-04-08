@@ -3,15 +3,17 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::RawFd;
 use std::path::{Path, PathBuf};
 
+use crate::backing_store::BackingStore;
+
 /// Writes to `{cache_dest}.partial` then atomically renames on success.
 /// FUSE ignores `.partial` files, so reads fall through to the backing store until complete.
-pub fn copy_to_cache(backing_fd: RawFd, rel_path: &Path, cache_dest: &Path) -> std::io::Result<()> {
+pub fn copy_to_cache(bs: &BackingStore, rel_path: &Path, cache_dest: &Path) -> std::io::Result<()> {
     if let Some(parent) = cache_dest.parent() {
         std::fs::create_dir_all(parent)?;
     }
 
     let partial = partial_path(cache_dest);
-    let src_fd = open_via_backing(backing_fd, rel_path)?;
+    let src_fd = bs.open_file(rel_path)?;
 
     let file_size_bytes = unsafe {
         let mut stat: libc::stat = std::mem::zeroed();
@@ -60,17 +62,15 @@ pub fn copy_to_cache(backing_fd: RawFd, rel_path: &Path, cache_dest: &Path) -> s
     }
     drop(dst_file);
 
-    // Best-effort: getattr serves metadata from the cached copy when available,
-    // so permissions and timestamps here are load-bearing, not just defensive.
+    // Preserve source permissions and mtime so getattr returns consistent metadata.
+    // LRU tracking is now handled by CacheDb (mark_cached / mark_hit) rather than atime.
     if let Some(ref st) = src_stat {
         if let Ok(c) = CString::new(partial.as_os_str().as_bytes()) {
             unsafe {
-                libc::chmod(c.as_ptr(), st.st_mode & 0o7777);
+                libc::chmod(c.as_ptr(), st.st_mode & 0o7777 as libc::mode_t);
                 libc::lchown(c.as_ptr(), st.st_uid, st.st_gid); // no-op if not root
                 let times = [
-                    // atime = now so eviction uses cache-insertion time, not source age.
-                    // mtime = source so getattr presents consistent timestamps to clients.
-                    libc::timespec { tv_sec: 0, tv_nsec: libc::UTIME_NOW },
+                    libc::timespec { tv_sec: st.st_atime, tv_nsec: st.st_atime_nsec },
                     libc::timespec { tv_sec: st.st_mtime, tv_nsec: st.st_mtime_nsec },
                 ];
                 libc::utimensat(libc::AT_FDCWD, c.as_ptr(), times.as_ptr(), 0);
@@ -97,19 +97,6 @@ fn partial_path(dest: &Path) -> PathBuf {
     let mut s = dest.as_os_str().to_owned();
     s.push(".partial");
     PathBuf::from(s)
-}
-
-fn open_via_backing(backing_fd: RawFd, rel_path: &Path) -> std::io::Result<RawFd> {
-    let bytes = rel_path.as_os_str().as_bytes();
-    let bytes = bytes.strip_prefix(b"/").unwrap_or(bytes);
-    let c = CString::new(bytes)
-        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid path"))?;
-    let fd = unsafe { libc::openat(backing_fd, c.as_ptr(), libc::O_RDONLY) };
-    if fd < 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(fd)
-    }
 }
 
 /// Copy all bytes from `src_fd` to `dst_file` using pread, advancing offset manually.

@@ -92,8 +92,8 @@ fn cache_transition_after_copy() {
 
 #[test]
 fn passthrough_mode_bypasses_cache() {
-    use plex_hot_cache::cache::CacheManager;
-    use plex_hot_cache::fuse_fs::PlexHotCacheFs;
+    use f_cache::cache::CacheManager;
+    use f_cache::fuse_fs::FCache;
     use fuser::{MountOption, SessionACL};
     use tempfile::TempDir;
 
@@ -108,7 +108,7 @@ fn passthrough_mode_bypasses_cache() {
     let cache_file = cache_dir.path().join("test.mkv");
     std::fs::write(&cache_file, b"cached content").unwrap();
 
-    let mut fs = PlexHotCacheFs::new(backing.path()).unwrap();
+    let mut fs = FCache::new(backing.path()).unwrap();
     fs.passthrough_mode = true; // bypass cache
     fs.cache = Some(std::sync::Arc::new(CacheManager::new(
         cache_dir.path().to_path_buf(),
@@ -132,7 +132,7 @@ fn passthrough_mode_bypasses_cache() {
 /// Startup cleanup: .partial files in the cache are removed on CacheManager creation.
 #[test]
 fn startup_cleanup_removes_partials() {
-    use plex_hot_cache::cache::CacheManager;
+    use f_cache::cache::CacheManager;
     use tempfile::TempDir;
 
     let cache_dir = TempDir::new().unwrap();
@@ -155,7 +155,8 @@ fn startup_cleanup_removes_partials() {
 
 #[test]
 fn size_eviction_removes_oldest_files() {
-    use plex_hot_cache::cache::CacheManager;
+    use f_cache::cache::CacheManager;
+    use std::path::Path;
     use tempfile::TempDir;
 
     let cache_dir = TempDir::new().unwrap();
@@ -163,10 +164,7 @@ fn size_eviction_removes_oldest_files() {
     // Write two files, each 600 bytes. Max size = 1000 bytes → one must go.
     let old_file = cache_dir.path().join("old.mkv");
     let new_file = cache_dir.path().join("new.mkv");
-
     std::fs::write(&old_file, vec![0u8; 600]).unwrap();
-    // Small sleep so atime/mtime differ.
-    std::thread::sleep(std::time::Duration::from_millis(50));
     std::fs::write(&new_file, vec![0u8; 600]).unwrap();
 
     // Max ~955 bytes (1000 / 1_073_741_824 GB), expiry = 9999 hours (never expires).
@@ -177,6 +175,20 @@ fn size_eviction_removes_oldest_files() {
         9999,
         0.0,
     );
+
+    // Register files in the DB. Give old_file an earlier last_hit_at so it
+    // is chosen as the LRU eviction candidate.
+    let mount_id = cache_dir.path().to_string_lossy().into_owned();
+    mgr.mark_cached(Path::new("old.mkv"), 600);
+    mgr.mark_cached(Path::new("new.mkv"), 600);
+    let db = mgr.cache_db();
+    let old_ts = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64)
+        - 3600; // 1 hour ago
+    db.set_last_hit_at_for_test(Path::new("old.mkv"), &mount_id, old_ts);
+
     mgr.evict_if_needed();
 
     // The older file should have been evicted; the newer one should survive.
@@ -186,24 +198,18 @@ fn size_eviction_removes_oldest_files() {
 
 #[test]
 fn expiry_eviction_removes_expired_files() {
-    use plex_hot_cache::cache::CacheManager;
+    use f_cache::cache::CacheManager;
+    use std::path::Path;
     use tempfile::TempDir;
 
     let cache_dir = TempDir::new().unwrap();
 
-    // Write two files.
     let expired = cache_dir.path().join("expired.mkv");
     let fresh = cache_dir.path().join("fresh.mkv");
     std::fs::write(&expired, b"old data").unwrap();
     std::fs::write(&fresh, b"new data").unwrap();
 
-    // Back-date the atime of `expired` to 2 hours ago (eviction uses atime).
-    let two_hours_ago = std::time::SystemTime::now()
-        - std::time::Duration::from_secs(7200);
-    let ft = filetime::FileTime::from_system_time(two_hours_ago);
-    filetime::set_file_atime(&expired, ft).unwrap();
-
-    // expiry = 1 hour → `expired` is past its window, `fresh` is not.
+    // expiry = 1 hour → `expired` (2 hours ago) is past its window, `fresh` is not.
     let mgr = CacheManager::new(
         cache_dir.path().to_path_buf(),
         cache_dir.path().to_path_buf(),
@@ -211,31 +217,38 @@ fn expiry_eviction_removes_expired_files() {
         1, // 1 hour expiry
         0.0,
     );
+
+    // Register both files. Back-date expired's last_hit_at to 2 hours ago.
+    let mount_id = cache_dir.path().to_string_lossy().into_owned();
+    mgr.mark_cached(Path::new("expired.mkv"), 8);
+    mgr.mark_cached(Path::new("fresh.mkv"), 8);
+    let db = mgr.cache_db();
+    let two_hours_ago = (std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64)
+        - 7200;
+    db.set_last_hit_at_for_test(Path::new("expired.mkv"), &mount_id, two_hours_ago);
+
     mgr.evict_if_needed();
 
     assert!(!expired.exists(), "expired file should be evicted");
     assert!(fresh.exists(), "fresh file should survive");
 }
 
-// Regression: a freshly cached file with an old source mtime must not be
-// immediately evicted.  The copier preserves source mtime for getattr fidelity
-// but sets atime=now; eviction must use atime, not mtime.
+// Regression: a freshly cached file must not be immediately evicted, even if
+// the source file has an old mtime. Eviction uses DB last_hit_at, not filesystem mtime.
 #[test]
 fn freshly_cached_file_with_old_mtime_survives_eviction() {
-    use plex_hot_cache::cache::CacheManager;
+    use f_cache::cache::CacheManager;
+    use std::path::Path;
     use tempfile::TempDir;
 
     let cache_dir = TempDir::new().unwrap();
     let cached = cache_dir.path().join("episode.mkv");
     std::fs::write(&cached, b"data").unwrap();
 
-    // Simulate the copier: set mtime to 6 months ago, leave atime as now.
-    let six_months_ago = std::time::SystemTime::now()
-        - std::time::Duration::from_secs(180 * 24 * 3600);
-    let ft = filetime::FileTime::from_system_time(six_months_ago);
-    filetime::set_file_mtime(&cached, ft).unwrap();
-
-    // expiry = 72 hours — file should survive because its atime is recent.
+    // expiry = 72 hours — file was just registered (last_hit_at = now) so it should survive.
     let mgr = CacheManager::new(
         cache_dir.path().to_path_buf(),
         cache_dir.path().to_path_buf(),
@@ -243,7 +256,8 @@ fn freshly_cached_file_with_old_mtime_survives_eviction() {
         72,
         0.0,
     );
+    mgr.mark_cached(Path::new("episode.mkv"), 4);
     mgr.evict_if_needed();
 
-    assert!(cached.exists(), "freshly cached file should not be evicted due to old source mtime");
+    assert!(cached.exists(), "freshly cached file should not be evicted");
 }

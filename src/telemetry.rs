@@ -1,0 +1,15 @@
+pub const EVENT_FUSE_OPEN: &str = "fuse_open";
+pub const EVENT_CACHE_HIT: &str = "cache_hit";
+pub const EVENT_CACHE_MISS: &str = "cache_miss";
+pub const EVENT_HANDLE_CLOSED: &str = "handle_closed";
+pub const EVENT_COPY_QUEUED: &str = "copy_queued";
+pub const EVENT_COPY_STARTED: &str = "copy_started";
+pub const EVENT_COPY_COMPLETE: &str = "copy_complete";
+pub const EVENT_COPY_FAILED: &str = "copy_failed";
+pub const EVENT_DEFERRED_CHANGED: &str = "deferred_changed";
+pub const EVENT_BUDGET_UPDATED: &str = "budget_updated";
+pub const EVENT_CACHING_WINDOW: &str = "caching_window";
+pub const EVENT_EVICTION: &str = "eviction";
+pub const EVENT_DB_INSERT: &str = "db_insert";
+pub const EVENT_DB_REMOVE: &str = "db_remove";
+pub const EVENT_DB_HIT: &str = "db_hit";

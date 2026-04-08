@@ -22,17 +22,21 @@ pub struct DashboardState {
     pub cache_file_count:      AtomicU64,
     pub cached_files:          Mutex<Vec<CachedFileInfo>>,
 
-    // -- Predictor (updated by MetricsLayer) --
+    // -- Action Engine (updated by MetricsLayer) --
     pub in_flight_count:   AtomicU64,
     pub deferred_count:    AtomicU64,
     pub budget_used_bytes: AtomicU64,
     pub budget_max_bytes:  AtomicU64,
-    pub trigger_strategy:  Mutex<String>,
+    pub preset_name:       Mutex<String>,
 
     // -- Copier (updated by MetricsLayer) --
     pub active_copies:    Mutex<HashMap<PathBuf, CopyProgress>>,
     pub completed_copies: AtomicU64,
     pub failed_copies:    AtomicU64,
+
+    // -- Evictions (updated by MetricsLayer) --
+    pub evictions_expired: AtomicU64,
+    pub evictions_size:    AtomicU64,
 
     // -- Scheduler (updated by MetricsLayer) --
     pub caching_allowed: AtomicBool,
@@ -70,11 +74,14 @@ impl DashboardState {
             deferred_count:    AtomicU64::new(0),
             budget_used_bytes: AtomicU64::new(0),
             budget_max_bytes:  AtomicU64::new(0),
-            trigger_strategy:  Mutex::new(String::new()),
+            preset_name:       Mutex::new(String::new()),
 
             active_copies:    Mutex::new(HashMap::new()),
             completed_copies: AtomicU64::new(0),
             failed_copies:    AtomicU64::new(0),
+
+            evictions_expired: AtomicU64::new(0),
+            evictions_size:    AtomicU64::new(0),
 
             caching_allowed: AtomicBool::new(false),
             window_start:    Mutex::new(String::new()),
@@ -96,8 +103,6 @@ impl DashboardState {
 
 }
 
-// ---- Sub-structs ----
-
 /// One entry in the recent-logs ring buffer.
 pub struct LogEntry {
     pub timestamp: String,
@@ -107,17 +112,16 @@ pub struct LogEntry {
 
 /// A file currently in the cache — for the Cache page file list.
 pub struct CachedFileInfo {
-    pub path:       PathBuf,
-    pub size_bytes: u64,
-    /// Last-accessed time (used as cache insertion/use time).
-    pub atime:      SystemTime,
-    /// Modified time (original file mtime — for display only).
-    pub mtime:      SystemTime,
-    /// When this file will be evicted (atime + expiry duration).
-    pub evicts_at:  SystemTime,
+    pub path:        PathBuf,
+    pub size_bytes:  u64,
+    /// When the file was first inserted into the cache (from DB `cached_at`).
+    pub cached_at:   SystemTime,
+    /// When the file was last read from the cache (from DB `last_hit_at`).
+    pub last_hit_at: SystemTime,
+    /// When this file will be evicted (last_hit_at + expiry duration).
+    pub evicts_at:   SystemTime,
 }
 
-/// A copy that is currently in progress.
 pub struct CopyProgress {
     pub path:       PathBuf,
     pub size_bytes: u64,

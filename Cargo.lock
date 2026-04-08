@@ -339,6 +339,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "f_cache"
+version = "0.1.2"
+dependencies = [
+ "anyhow",
+ "clap",
+ "crossterm",
+ "filetime",
+ "fuser",
+ "futures",
+ "hex",
+ "libc",
+ "ratatui",
+ "regex",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "fallible-iterator"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -840,32 +866,6 @@ name = "plain"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4596b6d070b27117e987119b4dac604f3c58cfb0b191112e24771b2faeac1a6"
-
-[[package]]
-name = "plex_hot_cache"
-version = "0.1.2"
-dependencies = [
- "anyhow",
- "clap",
- "crossterm",
- "filetime",
- "fuser",
- "futures",
- "hex",
- "libc",
- "ratatui",
- "regex",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "tokio",
- "toml",
- "tracing",
- "tracing-appender",
- "tracing-subscriber",
-]
 
 [[package]]
 name = "powerfmt"

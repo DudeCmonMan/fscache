@@ -1,5 +1,5 @@
 [Unit]
-Description=Plex Hot Cache — predictive SSD caching for Plex media
+Description=f-cache — predictive SSD caching via FUSE overmount
 Documentation=https://github.com/dudecmonman/plex-hot-cache
 After=network.target
 
@@ -10,7 +10,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/plex-hot-cache --config /etc/plex-hot-cache/config.toml
+ExecStart=/usr/local/bin/f-cache --config /etc/f-cache/config.toml
 Restart=on-failure
 RestartSec=10
 
@@ -23,7 +23,7 @@ TimeoutStopSec=30
 # Keep logs in the journal.
 StandardOutput=journal
 StandardError=journal
-SyslogIdentifier=plex-hot-cache
+SyslogIdentifier=f-cache
 
 [Install]
 WantedBy=multi-user.target

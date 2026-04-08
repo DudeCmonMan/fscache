@@ -82,19 +82,22 @@ fn concurrent_reads_different_files() {
 fn copier_no_partial_left_on_source_missing() {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
+    use std::sync::Arc;
     use tempfile::TempDir;
+    use f_cache::backing_store::BackingStore;
 
     let backing = TempDir::new().unwrap();
     let cache_dir = TempDir::new().unwrap();
     let dest = cache_dir.path().join("nonexistent.mkv");
 
     let c = CString::new(backing.path().as_os_str().as_bytes()).unwrap();
-    let backing_fd = unsafe { libc::open(c.as_ptr(), libc::O_PATH | libc::O_DIRECTORY) };
-    assert!(backing_fd >= 0);
+    let fd = unsafe { libc::open(c.as_ptr(), libc::O_PATH | libc::O_DIRECTORY) };
+    assert!(fd >= 0);
+    let bs = BackingStore::new(fd);
 
     // Source file does not exist → copy must fail cleanly
-    let result = plex_hot_cache::copier::copy_to_cache(
-        backing_fd,
+    let result = f_cache::copier::copy_to_cache(
+        &bs,
         std::path::Path::new("nonexistent.mkv"),
         &dest,
     );
@@ -107,15 +110,14 @@ fn copier_no_partial_left_on_source_missing() {
         !std::path::Path::new(&partial).exists(),
         ".partial must not exist after a failed copy"
     );
-
-    unsafe { libc::close(backing_fd) };
+    // BackingStore::drop closes the fd
 }
 
 /// A pre-existing .partial file in the cache dir is invisible through FUSE
 /// and is removed on the next CacheManager startup cleanup.
 #[test]
 fn orphaned_partial_is_cleaned_and_invisible() {
-    use plex_hot_cache::cache::CacheManager;
+    use f_cache::cache::CacheManager;
     use std::sync::Arc;
     use tempfile::TempDir;
 
@@ -139,8 +141,8 @@ fn orphaned_partial_is_cleaned_and_invisible() {
     assert!(!partial.exists(), ".partial must be removed by startup_cleanup");
 
     // FUSE mount should serve the backing file (not the now-deleted partial)
-    let mut fs = plex_hot_cache::fuse_fs::PlexHotCacheFs::new(backing.path()).unwrap();
-    fs.cache = Some(Arc::clone(&mgr));
+    let mut fs = f_cache::fuse_fs::FCache::new(backing.path()).unwrap();
+    fs.cache = Some(std::sync::Arc::clone(&mgr));
     let mount = TempDir::new().unwrap();
     let mut config = fuser::Config::default();
     config.mount_options = vec![
@@ -165,7 +167,7 @@ fn orphaned_partial_is_cleaned_and_invisible() {
 /// across open/close cycles and are an OS concern, not a FUSE concern.
 #[test]
 fn fuse_falls_back_to_backing_on_cache_miss() {
-    use plex_hot_cache::cache::CacheManager;
+    use f_cache::cache::CacheManager;
     use std::sync::Arc;
     use tempfile::TempDir;
 
@@ -184,8 +186,8 @@ fn fuse_falls_back_to_backing_on_cache_miss() {
     std::fs::write(cache_dir.path().join("cached.mkv"), b"ssdcached_A").unwrap(); // 11 bytes
 
     let mgr = Arc::new(CacheManager::new(cache_dir.path().to_path_buf(), cache_dir.path().to_path_buf(), 1.0, 72, 0.0));
-    let mut fs = plex_hot_cache::fuse_fs::PlexHotCacheFs::new(backing.path()).unwrap();
-    fs.cache = Some(Arc::clone(&mgr));
+    let mut fs = f_cache::fuse_fs::FCache::new(backing.path()).unwrap();
+    fs.cache = Some(std::sync::Arc::clone(&mgr));
 
     let mut config = fuser::Config::default();
     config.mount_options = vec![

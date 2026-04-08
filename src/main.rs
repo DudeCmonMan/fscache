@@ -1,11 +1,16 @@
+mod action_engine;
+mod backing_store;
 mod cache;
 mod config;
 mod copier;
+mod db;
 mod fuse_fs;
 mod inode;
-mod plex_db;
-mod predictor;
+mod prediction_utils;
+mod preset;
+mod presets;
 mod scheduler;
+mod telemetry;
 mod tui;
 mod utils;
 
@@ -19,9 +24,9 @@ const BUILD_VERSION: &str = env!("BUILD_VERSION");
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "plex-hot-cache",
+    name = "f-cache",
     version = BUILD_VERSION,
-    about = "Predictive SSD caching for Plex media — transparent FUSE overmount"
+    about = "Generic FUSE caching framework — transparent SSD overmount"
 )]
 struct Args {
     /// Path to config file (default: look next to binary or in current directory)
@@ -48,7 +53,7 @@ async fn main() -> anyhow::Result<()> {
     let file_filter = tracing_subscriber::EnvFilter::new(&config.logging.file_level);
 
     std::fs::create_dir_all(&config.logging.log_directory).ok();
-    let file_appender = tracing_appender::rolling::daily(&config.logging.log_directory, "plex-hot-cache.log");
+    let file_appender = tracing_appender::rolling::daily(&config.logging.log_directory, "f-cache.log");
     let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
 
     let dashboard = if args.tui {
@@ -87,7 +92,7 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    tracing::info!("plex-hot-cache {} starting", BUILD_VERSION);
+    tracing::info!("f-cache {} starting", BUILD_VERSION);
     tracing::info!("Config: {}", config_path.display());
     tracing::info!("Cache:  {}", config.paths.cache_directory);
     tracing::info!(
@@ -109,21 +114,12 @@ async fn main() -> anyhow::Result<()> {
     let base_cache_dir = PathBuf::from(&config.paths.cache_directory);
     std::fs::create_dir_all(&base_cache_dir)?;
 
-    let trigger_strategy = match config.cache.trigger_strategy.as_str() {
-        "rolling-buffer" => fuse_fs::TriggerStrategy::RollingBuffer,
-        _ => fuse_fs::TriggerStrategy::CacheMissOnly,
-    };
-    tracing::info!("Trigger strategy: {}", config.cache.trigger_strategy);
-    if config.cache.playback_threshold_secs > 0 {
-        tracing::info!("Playback detection threshold: {}s", config.cache.playback_threshold_secs);
-    }
     tracing::info!(
         "Schedule: caching allowed {} to {}",
         config.schedule.cache_window_start,
         config.schedule.cache_window_end
     );
 
-    let plex_db_enabled = config.plex.enabled.unwrap_or(true);
     let max_cache_pull_bytes = (config.cache.max_cache_pull_per_mount_gb * 1_073_741_824.0) as u64;
     if max_cache_pull_bytes > 0 {
         tracing::info!("Max cache pull budget per mount: {:.1} GB", config.cache.max_cache_pull_per_mount_gb);
@@ -135,7 +131,7 @@ async fn main() -> anyhow::Result<()> {
     fuse_config.mount_options = vec![
         MountOption::RO,
         MountOption::AutoUnmount,
-        MountOption::FSName("plex-hot-cache".to_string()),
+        MountOption::FSName("f-cache".to_string()),
     ];
     fuse_config.acl = SessionACL::All;
 
@@ -155,26 +151,35 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("[{}] Cache:  {}", mount_name, mount_cache_dir.display());
 
         // Must open O_PATH fd BEFORE mounting FUSE over the target directory.
-        let mut fs = fuse_fs::PlexHotCacheFs::new(target)?;
+        let mut fs = fuse_fs::FCache::new(target)?;
         fs.passthrough_mode = config.cache.passthrough_mode;
         fs.repeat_log_window = std::time::Duration::from_secs(config.logging.repeat_log_window_secs);
-        fs.trigger_strategy = trigger_strategy;
-        fs.playback_threshold = std::time::Duration::from_secs(config.cache.playback_threshold_secs);
-        fs.process_blocklist = config.cache.process_blocklist.iter()
-            .filter(|name| {
-                if name.as_str() == "Plex Transcoder" {
-                    tracing::warn!(
-                        "[{}] Ignoring \"Plex Transcoder\" in process_blocklist — \
-                         detection vs playback transcoding is handled internally",
-                        mount_name
-                    );
-                    false
-                } else {
-                    true
-                }
-            })
-            .cloned()
-            .collect();
+
+        let blocklist = config.plex.process_blocklist.clone();
+        let rolling_buffer = config.plex.mode == "rolling-buffer";
+
+        let preset: std::sync::Arc<dyn preset::CachePreset> = match config.preset.name.as_str() {
+            "plex-episode-prediction" | "episode-prediction" => std::sync::Arc::new(
+                presets::plex_episode_prediction::PlexEpisodePrediction::new(
+                    config.plex.lookahead, blocklist, rolling_buffer,
+                )
+            ),
+            "cache-on-miss" => std::sync::Arc::new(
+                presets::cache_on_miss::CacheOnMiss::new(blocklist)
+            ),
+            other => {
+                tracing::warn!(
+                    "[{}] Unknown preset {:?}, falling back to \"plex-episode-prediction\"",
+                    mount_name, other
+                );
+                std::sync::Arc::new(
+                    presets::plex_episode_prediction::PlexEpisodePrediction::new(
+                        config.plex.lookahead, blocklist, rolling_buffer,
+                    )
+                )
+            }
+        };
+        fs.preset = Some(std::sync::Arc::clone(&preset));
 
         let cache_manager = Arc::new(cache::CacheManager::new(
             mount_cache_dir.clone(),
@@ -186,45 +191,30 @@ async fn main() -> anyhow::Result<()> {
         cache_manager.startup_cleanup();
         fs.cache = Some(Arc::clone(&cache_manager));
 
-        let plex_db = if plex_db_enabled {
-            let db = plex_db::PlexDb::open(
-                std::path::Path::new(&config.plex.db_path),
-                target,
-            ).ok();
-            if db.is_some() {
-                tracing::info!("[{}] Plex DB opened: {}", mount_name, config.plex.db_path);
-            } else {
-                tracing::warn!("[{}] Plex DB not available, using regex fallback", mount_name);
-            }
-            db
-        } else {
-            None
-        };
-
         let (access_tx, access_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (copy_tx, copy_rx) = tokio::sync::mpsc::channel::<predictor::CopyRequest>(64);
+        let (copy_tx, copy_rx) = tokio::sync::mpsc::channel::<action_engine::CopyRequest>(64);
         fs.access_tx = Some(access_tx);
 
-        let backing_fd = fs.backing_fd;
+        let backing_store = std::sync::Arc::clone(&fs.backing_store);
         let scheduler = scheduler::Scheduler::new(
             &config.schedule.cache_window_start,
             &config.schedule.cache_window_end,
         )?;
-        let predictor_instance = predictor::Predictor::new(
+        let engine = action_engine::ActionEngine::new(
             access_rx,
             copy_tx,
             Arc::clone(&cache_manager),
-            config.cache.lookahead,
-            plex_db,
+            Some(preset),
             scheduler,
-            backing_fd,
+            std::sync::Arc::clone(&backing_store),
             max_cache_pull_bytes,
-            mount_cache_dir,
             config.cache.deferred_ttl_minutes,
+            config.cache.min_access_secs,
+            config.cache.min_file_size_mb,
         );
-        tokio::spawn(predictor_instance.run());
-        tokio::spawn(predictor::run_copier_task(
-            backing_fd,
+        tokio::spawn(engine.run());
+        tokio::spawn(action_engine::run_copier_task(
+            backing_store,
             copy_rx,
             Arc::clone(&cache_manager),
         ));
@@ -245,9 +235,9 @@ async fn main() -> anyhow::Result<()> {
             mount_list.push(tui::state::MountInfo { target: m.target.clone(), active: true });
         }
         drop(mount_list);
-        *state.window_start.lock().unwrap()      = config.schedule.cache_window_start.clone();
-        *state.window_end.lock().unwrap()        = config.schedule.cache_window_end.clone();
-        *state.trigger_strategy.lock().unwrap()  = config.cache.trigger_strategy.clone();
+        *state.window_start.lock().unwrap()  = config.schedule.cache_window_start.clone();
+        *state.window_end.lock().unwrap()    = config.schedule.cache_window_end.clone();
+        *state.preset_name.lock().unwrap()   = config.preset.name.clone();
         if max_cache_pull_bytes > 0 {
             use std::sync::atomic::Ordering::Relaxed;
             state.budget_max_bytes.store(max_cache_pull_bytes, Relaxed);
@@ -286,7 +276,6 @@ async fn main() -> anyhow::Result<()> {
         } => tracing::info!("TUI quit"),
     }
 
-    // Signal TUI to stop if it's still running (SIGINT path).
     let _ = shutdown_tx.send(true);
 
     // Lazy unmount all: detach each mount point from the namespace immediately so

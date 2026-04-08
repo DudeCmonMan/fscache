@@ -161,34 +161,38 @@ fn statfs_returns_valid_data() {
     assert!(buf.f_namemax > 0, "max filename length must be positive");
 }
 
-// ---- Cache-preferred stat ----
+// ---- Backing-store stat ----
 
-/// getattr on a cached file must return the cached file's stat, not the backing file's.
-/// We verify this by copying to cache, then modifying the backing file's mtime to a
-/// different value. If getattr returns the cache mtime, the backing was not consulted.
+/// getattr always reflects the backing store's current stat, not the cached copy.
+/// Cached files are exact metadata mirrors of the source at copy time, so for the
+/// common case (backing file unchanged) both return identical values. This test
+/// verifies that after the backing mtime changes, getattr returns the NEW backing
+/// mtime rather than a stale cached value.
 #[tokio::test]
-async fn getattr_prefers_cache_over_backing() {
+async fn getattr_returns_backing_store_mtime() {
     let h = FuseHarness::new_with_cache(1.0, 72).expect("FUSE harness with cache failed");
 
     write_backing_file(&h, "tv/Show/S01E01.mkv", b"episode content");
     let backing_path = h.backing_path().join("tv/Show/S01E01.mkv");
 
-    let cache_mtime = filetime::FileTime::from_unix_time(1_700_000_000, 0);
-    filetime::set_file_mtime(&backing_path, cache_mtime).unwrap();
+    // Set initial mtime and copy to cache.
+    let initial_mtime = filetime::FileTime::from_unix_time(1_700_000_000, 0);
+    filetime::set_file_mtime(&backing_path, initial_mtime).unwrap();
 
     let cache_dest = h.cache_path().join("tv/Show/S01E01.mkv");
-    let backing_fd = {
+    {
         let c = std::ffi::CString::new(h.backing_path().as_os_str().as_bytes()).unwrap();
-        unsafe { libc::open(c.as_ptr(), libc::O_PATH | libc::O_DIRECTORY) }
-    };
-    assert!(backing_fd >= 0);
-    plex_hot_cache::copier::copy_to_cache(backing_fd, std::path::Path::new("tv/Show/S01E01.mkv"), &cache_dest).unwrap();
-    unsafe { libc::close(backing_fd) };
+        let fd = unsafe { libc::open(c.as_ptr(), libc::O_PATH | libc::O_DIRECTORY) };
+        assert!(fd >= 0);
+        let bs = f_cache::backing_store::BackingStore::new(fd);
+        f_cache::copier::copy_to_cache(&bs, std::path::Path::new("tv/Show/S01E01.mkv"), &cache_dest).unwrap();
+    }
 
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
-    let backing_mtime = filetime::FileTime::from_unix_time(1_500_000_000, 0);
-    filetime::set_file_mtime(&backing_path, backing_mtime).unwrap();
+    // Now change the backing mtime — getattr must reflect the current backing stat.
+    let new_mtime = filetime::FileTime::from_unix_time(1_600_000_000, 0);
+    filetime::set_file_mtime(&backing_path, new_mtime).unwrap();
 
     tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
@@ -196,8 +200,8 @@ async fn getattr_prefers_cache_over_backing() {
         .expect("getattr through FUSE failed");
 
     assert_eq!(
-        meta.mtime(), 1_700_000_000,
-        "getattr should return the cached file's mtime, not the backing file's (which was changed to 1_500_000_000)"
+        meta.mtime(), 1_600_000_000,
+        "getattr should return the current backing file mtime (1_600_000_000)"
     );
 }
 
@@ -218,16 +222,15 @@ async fn cached_file_preserves_metadata() {
     tokio::time::sleep(Duration::from_millis(100)).await;
 
     let cache_dest = h.cache_path().join("tv/Show/S01E01.mkv");
-    let backing_fd = {
-        // FuseHarness doesn't expose backing_fd, so open one ourselves.
+    {
+        // FuseHarness doesn't expose backing_store, so open one ourselves.
         let c = std::ffi::CString::new(h.backing_path().as_os_str().as_bytes()).unwrap();
-        unsafe { libc::open(c.as_ptr(), libc::O_PATH | libc::O_DIRECTORY) }
-    };
-    assert!(backing_fd >= 0, "failed to open backing dir");
-
-    plex_hot_cache::copier::copy_to_cache(backing_fd, std::path::Path::new("tv/Show/S01E01.mkv"), &cache_dest)
-        .expect("copy_to_cache failed");
-    unsafe { libc::close(backing_fd) };
+        let fd = unsafe { libc::open(c.as_ptr(), libc::O_PATH | libc::O_DIRECTORY) };
+        assert!(fd >= 0, "failed to open backing dir");
+        let bs = f_cache::backing_store::BackingStore::new(fd);
+        f_cache::copier::copy_to_cache(&bs, std::path::Path::new("tv/Show/S01E01.mkv"), &cache_dest)
+            .expect("copy_to_cache failed");
+    }
 
     assert!(cache_dest.exists(), "cached file should exist after copy_to_cache");
 

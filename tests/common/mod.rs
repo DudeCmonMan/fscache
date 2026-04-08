@@ -2,10 +2,12 @@ use std::path::Path;
 use std::sync::Arc;
 
 use fuser::{MountOption, SessionACL};
-use plex_hot_cache::cache::CacheManager;
-use plex_hot_cache::fuse_fs::{PlexHotCacheFs, TriggerStrategy};
-use plex_hot_cache::predictor::{run_copier_task, AccessEvent, CopyRequest, Predictor};
-use plex_hot_cache::scheduler::Scheduler;
+use f_cache::action_engine::{run_copier_task, AccessEvent, ActionEngine, CopyRequest};
+use f_cache::cache::CacheManager;
+use f_cache::fuse_fs::FCache;
+use f_cache::preset::CachePreset;
+use f_cache::presets::plex_episode_prediction::PlexEpisodePrediction;
+use f_cache::scheduler::Scheduler;
 use tempfile::TempDir;
 use tokio::sync::mpsc;
 
@@ -13,7 +15,7 @@ fn test_fuse_config() -> fuser::Config {
     let mut config = fuser::Config::default();
     config.mount_options = vec![
         MountOption::RO,
-        MountOption::FSName("plex-hot-cache-test".to_string()),
+        MountOption::FSName("f-cache-test".to_string()),
     ];
     config.acl = SessionACL::Owner;
     config
@@ -40,7 +42,7 @@ impl FuseHarness {
         let backing = TempDir::new()?;
         let mount = TempDir::new()?;
 
-        let fs = PlexHotCacheFs::new(backing.path())?;
+        let fs = FCache::new(backing.path())?;
         let session = fuser::spawn_mount2(fs, mount.path(), &test_fuse_config())?;
 
         Ok(Self {
@@ -58,7 +60,7 @@ impl FuseHarness {
         let mount = TempDir::new()?;
         let cache_dir = TempDir::new()?;
 
-        let mut fs = PlexHotCacheFs::new(backing.path())?;
+        let mut fs = FCache::new(backing.path())?;
         let cache_mgr = Arc::new(CacheManager::new(
             cache_dir.path().to_path_buf(),
             cache_dir.path().to_path_buf(),
@@ -96,125 +98,32 @@ impl FuseHarness {
     /// The predictor/copier tasks are spawned on the current tokio runtime — call this
     /// from inside `#[tokio::test]`.
     pub fn new_full_pipeline(lookahead: usize) -> anyhow::Result<Self> {
-        Self::new_full_pipeline_with_strategy(lookahead, TriggerStrategy::CacheMissOnly)
+        let preset = Arc::new(PlexEpisodePrediction::new(lookahead, vec![], false));
+        Self::new_full_pipeline_with_preset(preset)
     }
 
-    /// Full pipeline with a non-zero playback detection threshold.
-    /// Use this to test that prediction is suppressed for short reads and fires
-    /// only after `threshold` seconds of sustained reading.
-    pub fn new_full_pipeline_with_threshold(lookahead: usize, threshold: std::time::Duration) -> anyhow::Result<Self> {
-        let backing = TempDir::new()?;
-        let mount = TempDir::new()?;
-        let cache_dir = TempDir::new()?;
-
-        let mut fs = PlexHotCacheFs::new(backing.path())?;
-        fs.playback_threshold = threshold;
-        let backing_fd = fs.backing_fd;
-
-        let cache_mgr = Arc::new(CacheManager::new(
-            cache_dir.path().to_path_buf(),
-            cache_dir.path().to_path_buf(),
-            1.0,
-            72,
-            0.0,
-        ));
-        cache_mgr.startup_cleanup();
-        fs.cache = Some(Arc::clone(&cache_mgr));
-
-        let (access_tx, access_rx) = mpsc::unbounded_channel::<AccessEvent>();
-        let (copy_tx, copy_rx) = mpsc::channel::<CopyRequest>(64);
-        fs.access_tx = Some(access_tx);
-
-        let scheduler = Scheduler::new("00:00", "23:59").unwrap();
-        let predictor = Predictor::new(
-            access_rx,
-            copy_tx,
-            Arc::clone(&cache_mgr),
-            lookahead,
-            None,
-            scheduler,
-            backing_fd,
-            0,
-            cache_dir.path().to_path_buf(),
-            0,
-        );
-        tokio::spawn(predictor.run());
-        tokio::spawn(run_copier_task(backing_fd, copy_rx, Arc::clone(&cache_mgr)));
-
-        let session = fuser::spawn_mount2(fs, mount.path(), &test_fuse_config())?;
-
-        Ok(Self {
-            backing,
-            mount,
-            cache: Some(cache_dir),
-            _session: session,
-        })
-    }
-
-    /// Full pipeline with a time threshold and process blocklist.
-    /// Use this to test that blocklisted processes never trigger prediction.
+    /// Full pipeline with a process blocklist.
+    /// Blocked processes (and their children) never trigger prediction.
     pub fn new_full_pipeline_with_blocklist(
         lookahead: usize,
-        threshold: std::time::Duration,
         blocklist: Vec<String>,
     ) -> anyhow::Result<Self> {
-        let backing = TempDir::new()?;
-        let mount = TempDir::new()?;
-        let cache_dir = TempDir::new()?;
-
-        let mut fs = PlexHotCacheFs::new(backing.path())?;
-        fs.playback_threshold = threshold;
-        fs.process_blocklist = blocklist;
-        let backing_fd = fs.backing_fd;
-
-        let cache_mgr = Arc::new(CacheManager::new(
-            cache_dir.path().to_path_buf(),
-            cache_dir.path().to_path_buf(),
-            1.0,
-            72,
-            0.0,
-        ));
-        cache_mgr.startup_cleanup();
-        fs.cache = Some(Arc::clone(&cache_mgr));
-
-        let (access_tx, access_rx) = mpsc::unbounded_channel::<AccessEvent>();
-        let (copy_tx, copy_rx) = mpsc::channel::<CopyRequest>(64);
-        fs.access_tx = Some(access_tx);
-
-        let scheduler = Scheduler::new("00:00", "23:59").unwrap();
-        let predictor = Predictor::new(
-            access_rx,
-            copy_tx,
-            Arc::clone(&cache_mgr),
-            lookahead,
-            None,
-            scheduler,
-            backing_fd,
-            0,
-            cache_dir.path().to_path_buf(),
-            0,
-        );
-        tokio::spawn(predictor.run());
-        tokio::spawn(run_copier_task(backing_fd, copy_rx, Arc::clone(&cache_mgr)));
-
-        let session = fuser::spawn_mount2(fs, mount.path(), &test_fuse_config())?;
-
-        Ok(Self {
-            backing,
-            mount,
-            cache: Some(cache_dir),
-            _session: session,
-        })
+        let preset = Arc::new(PlexEpisodePrediction::new(lookahead, blocklist, false));
+        Self::new_full_pipeline_with_preset(preset)
     }
 
-    pub fn new_full_pipeline_with_strategy(lookahead: usize, strategy: TriggerStrategy) -> anyhow::Result<Self> {
+    /// Full pipeline with a caller-supplied preset. Use this to test presets
+    /// other than PlexEpisodePrediction (e.g. CacheOnMiss) against a live FUSE mount.
+    ///
+    /// Must be called from inside `#[tokio::test]`.
+    pub fn new_full_pipeline_with_preset(preset: Arc<dyn CachePreset>) -> anyhow::Result<Self> {
         let backing = TempDir::new()?;
         let mount = TempDir::new()?;
         let cache_dir = TempDir::new()?;
 
-        let mut fs = PlexHotCacheFs::new(backing.path())?;
-        fs.trigger_strategy = strategy;
-        let backing_fd = fs.backing_fd;
+        let mut fs = FCache::new(backing.path())?;
+        let backing_store = Arc::clone(&fs.backing_store);
+        fs.preset = Some(Arc::clone(&preset));
 
         let cache_mgr = Arc::new(CacheManager::new(
             cache_dir.path().to_path_buf(),
@@ -231,20 +140,20 @@ impl FuseHarness {
         fs.access_tx = Some(access_tx);
 
         let scheduler = Scheduler::new("00:00", "23:59").unwrap();
-        let predictor = Predictor::new(
+        let engine = ActionEngine::new(
             access_rx,
             copy_tx,
             Arc::clone(&cache_mgr),
-            lookahead,
-            None, // no Plex DB in tests — use regex fallback
+            Some(preset),
             scheduler,
-            backing_fd,
-            0, // max_cache_pull disabled by default in tests
-            cache_dir.path().to_path_buf(),
-            0, // deferred_ttl_minutes: 0 disables persistence in tests
+            Arc::clone(&backing_store),
+            0,
+            0,
+            0,
+            0,
         );
-        tokio::spawn(predictor.run());
-        tokio::spawn(run_copier_task(backing_fd, copy_rx, Arc::clone(&cache_mgr)));
+        tokio::spawn(engine.run());
+        tokio::spawn(run_copier_task(backing_store, copy_rx, Arc::clone(&cache_mgr)));
 
         let session = fuser::spawn_mount2(fs, mount.path(), &test_fuse_config())?;
 
@@ -258,7 +167,7 @@ impl FuseHarness {
 }
 
 /// Overmount harness: FUSE is mounted ON TOP of the same directory the files
-/// live in, exactly as in production.  The O_PATH fd retained in `PlexHotCacheFs`
+/// live in, exactly as in production.  The O_PATH fd retained in `FCache`
 /// provides access to the real files underneath after the overmount.
 ///
 /// ## Drop ordering
@@ -295,8 +204,11 @@ impl OvermountHarness {
         // goes through FUSE (RO) and std::fs::write would return EACCES.
         populate(dir.path());
 
-        let mut fs = PlexHotCacheFs::new(dir.path())?;
-        let backing_fd = fs.backing_fd;
+        let mut fs = FCache::new(dir.path())?;
+        let backing_store = Arc::clone(&fs.backing_store);
+
+        let preset = Arc::new(PlexEpisodePrediction::new(lookahead, vec![], false));
+        fs.preset = Some(Arc::clone(&preset) as Arc<dyn CachePreset>);
 
         let cache_mgr = Arc::new(CacheManager::new(
             cache_dir.path().to_path_buf(),
@@ -313,27 +225,27 @@ impl OvermountHarness {
         fs.access_tx = Some(access_tx);
 
         let scheduler = Scheduler::new("00:00", "23:59").unwrap();
-        let predictor = Predictor::new(
+        let engine = ActionEngine::new(
             access_rx,
             copy_tx,
             Arc::clone(&cache_mgr),
-            lookahead,
-            None,
+            Some(preset as Arc<dyn CachePreset>),
             scheduler,
-            backing_fd,
-            0, // max_cache_pull disabled by default in tests
-            cache_dir.path().to_path_buf(),
-            0, // deferred_ttl_minutes: 0 disables persistence in tests
+            Arc::clone(&backing_store),
+            0,
+            0,
+            0,
+            0,
         );
-        tokio::spawn(predictor.run());
-        tokio::spawn(run_copier_task(backing_fd, copy_rx, Arc::clone(&cache_mgr)));
+        tokio::spawn(engine.run());
+        tokio::spawn(run_copier_task(backing_store, copy_rx, Arc::clone(&cache_mgr)));
 
         // AutoUnmount requires SessionACL::All (root) so cannot be used in tests.
         // Clean unmount is guaranteed by drop ordering: _session drops first.
         let mut config = fuser::Config::default();
         config.mount_options = vec![
             MountOption::RO,
-            MountOption::FSName("plex-hot-cache-overmount-test".to_string()),
+            MountOption::FSName("f-cache-overmount-test".to_string()),
         ];
         config.acl = SessionACL::Owner;
 
@@ -380,7 +292,7 @@ impl MultiFuseHarness {
             let cache_subdir = shared_cache_base.path().join(i.to_string());
             std::fs::create_dir_all(&cache_subdir)?;
 
-            let mut fs = PlexHotCacheFs::new(backing.path())?;
+            let mut fs = FCache::new(backing.path())?;
             let cache_mgr = Arc::new(CacheManager::new(
                 cache_subdir,
                 shared_cache_base.path().to_path_buf(),
@@ -408,8 +320,11 @@ impl MultiFuseHarness {
             let cache_subdir = shared_cache_base.path().join(i.to_string());
             std::fs::create_dir_all(&cache_subdir)?;
 
-            let mut fs = PlexHotCacheFs::new(backing.path())?;
-            let backing_fd = fs.backing_fd;
+            let mut fs = FCache::new(backing.path())?;
+            let backing_store = Arc::clone(&fs.backing_store);
+
+            let preset = Arc::new(PlexEpisodePrediction::new(lookahead, vec![], false));
+            fs.preset = Some(Arc::clone(&preset) as Arc<dyn CachePreset>);
 
             let cache_mgr = Arc::new(CacheManager::new(
                 cache_subdir.clone(),
@@ -426,20 +341,20 @@ impl MultiFuseHarness {
             fs.access_tx = Some(access_tx);
 
             let scheduler = Scheduler::new("00:00", "23:59").unwrap();
-            let predictor = Predictor::new(
+            let engine = ActionEngine::new(
                 access_rx,
                 copy_tx,
                 Arc::clone(&cache_mgr),
-                lookahead,
-                None,
+                Some(preset as Arc<dyn CachePreset>),
                 scheduler,
-                backing_fd,
+                Arc::clone(&backing_store),
                 0,
-                cache_subdir,
+                0,
+                0,
                 0,
             );
-            tokio::spawn(predictor.run());
-            tokio::spawn(run_copier_task(backing_fd, copy_rx, Arc::clone(&cache_mgr)));
+            tokio::spawn(engine.run());
+            tokio::spawn(run_copier_task(backing_store, copy_rx, Arc::clone(&cache_mgr)));
 
             let session = fuser::spawn_mount2(fs, mount.path(), &test_fuse_config())?;
             mounts.push(FuseHarness { backing, mount, cache: None, _session: session });

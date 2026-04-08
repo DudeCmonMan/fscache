@@ -35,18 +35,25 @@ where
             Level::TRACE => "TRACE",
         };
 
-        // Extract the message field (the unstructured human-readable part).
         let mut msg_visitor = MessageVisitor::default();
         event.record(&mut msg_visitor);
 
+        let mut message = msg_visitor.message;
+        if let Some(path) = msg_visitor.path {
+            message.push_str(&format!("  [{}]", path));
+        }
+        if let Some(reason) = msg_visitor.reason {
+            message.push_str(&format!("  ({})", reason));
+        }
+
         let now = super::ui::fmt_time(SystemTime::now());
         if self.state.tui_exited.load(Relaxed) {
-            eprintln!("{} {} {}", now, level.trim(), msg_visitor.message);
+            eprintln!("{} {} {}", now, level.trim(), message);
         } else {
             self.state.push_log(LogEntry {
                 timestamp: now,
                 level:     level.to_string(),
-                message:   msg_visitor.message,
+                message,
             });
         }
     }
@@ -55,18 +62,28 @@ where
 #[derive(Default)]
 struct MessageVisitor {
     message: String,
+    path:    Option<String>,
+    reason:  Option<String>,
 }
 
 impl tracing::field::Visit for MessageVisitor {
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-        if field.name() == "message" {
-            self.message = format!("{:?}", value).trim_matches('"').to_string();
+        let s = format!("{:?}", value);
+        let s = s.trim_matches('"');
+        match field.name() {
+            "message" => self.message = s.to_string(),
+            "path"    => self.path    = Some(s.to_string()),
+            "reason"  => self.reason  = Some(s.to_string()),
+            _ => {}
         }
     }
 
     fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-        if field.name() == "message" {
-            self.message = value.to_string();
+        match field.name() {
+            "message" => self.message = value.to_string(),
+            "path"    => self.path    = Some(value.to_string()),
+            "reason"  => self.reason  = Some(value.to_string()),
+            _ => {}
         }
     }
 }

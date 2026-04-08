@@ -1,6 +1,37 @@
 use anyhow::Context;
 use std::path::{Path, PathBuf};
 
+/// Walk `dir` recursively, returning all non-metadata file paths.
+/// Excludes `.partial`, `.db`, `.db-wal`, `.db-shm` files.
+pub(crate) fn collect_cache_files(dir: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    collect_cache_files_inner(dir, &mut out);
+    out
+}
+
+fn collect_cache_files_inner(dir: &Path, out: &mut Vec<PathBuf>) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                collect_cache_files_inner(&path, out);
+            } else if !is_non_media_file(&path) {
+                out.push(path);
+            }
+        }
+    }
+}
+
+/// Returns true for files that should be excluded from cache accounting
+/// (SQLite DB files, WAL/SHM journals, .partial copies-in-progress).
+pub(crate) fn is_non_media_file(path: &Path) -> bool {
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    name.ends_with(".partial")
+        || name.ends_with(".db")
+        || name.ends_with(".db-wal")
+        || name.ends_with(".db-shm")
+}
+
 /// Derive a unique, human-readable cache subdirectory name for a target path.
 ///
 /// Sanitizes the full path into a dash-separated slug and appends an 8-char hex
@@ -31,7 +62,6 @@ pub fn mount_cache_name(target: &Path) -> String {
     format!("{slug}-{hash:08x}")
 }
 
-/// Validate a list of target directories: non-empty, all exist, no duplicates.
 pub fn validate_targets(targets: &[PathBuf]) -> anyhow::Result<()> {
     if targets.is_empty() {
         anyhow::bail!("target_directories is empty — add at least one path");

@@ -1,5 +1,8 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
+
+use crate::db::CacheDb;
 
 /// Snapshot of cache state returned by [`CacheManager::stats`].
 /// Polled by the TUI every few seconds — never called from the FUSE hot path.
@@ -10,26 +13,31 @@ pub struct CacheStats {
     pub free_space_bytes: Option<u64>,
     pub used_bytes:       u64,
     pub file_count:       usize,
-    /// (relative_path, size_bytes, atime)
-    pub files:            Vec<(PathBuf, u64, SystemTime)>,
+    /// (relative_path, size_bytes, cached_at, last_hit_at) — timestamps from DB
+    pub files:            Vec<(PathBuf, u64, SystemTime, SystemTime)>,
 }
 
-/// No persistent database — uses filesystem timestamps exclusively.
+/// Filesystem-backed cache manager with SQLite metadata tracking.
+///
+/// `is_cached()` uses a filesystem existence check (fast, no SQLite on the FUSE hot path).
+/// Eviction and budget tracking use the embedded `CacheDb` (DB queries, not filesystem walks).
+/// The DB also handles `mark_cached`/`mark_hit` bookkeeping, deferred event persistence,
+/// and startup reconciliation.
 pub struct CacheManager {
     cache_dir: PathBuf,
-    /// Root directory measured for global size budgeting. In single-mount mode
-    /// this equals `cache_dir`. In multi-mount mode this is the shared parent so
-    /// eviction respects the total budget across all mounts.
-    global_cache_dir: PathBuf,
     max_size_bytes: u64,
     expiry: Duration,
     min_free_bytes: u64,
+    /// Unique identifier for this mount's cache partition within the shared DB.
+    mount_id: String,
+    /// Shared SQLite database for cache metadata, eviction tracking, and deferred events.
+    db: Arc<CacheDb>,
 }
 
 impl CacheManager {
-    /// `cache_dir` is this mount's write directory; `global_cache_dir` is the
-    /// root measured for budget enforcement (pass `cache_dir.clone()` for
-    /// single-mount setups where local and global are the same).
+    /// `cache_dir` is this mount's write directory; `global_cache_dir` is the shared
+    /// cache root used for DB placement and drive capacity checks (pass `cache_dir.clone()`
+    /// for single-mount setups).
     pub fn new(
         cache_dir: PathBuf,
         global_cache_dir: PathBuf,
@@ -51,12 +59,23 @@ impl CacheManager {
             }
             _ => configured,
         };
+
+        // Open the shared DB in the global cache root so all mounts use the same file.
+        let db_path = global_cache_dir.join("fcache.db");
+        let db = Arc::new(CacheDb::open(&db_path).unwrap_or_else(|e| {
+            tracing::warn!("failed to open cache DB {}: {e} — falling back to no-op DB", db_path.display());
+            CacheDb::open(std::path::Path::new(":memory:")).expect("in-memory DB must open")
+        }));
+
+        let mount_id = cache_dir.to_string_lossy().into_owned();
+
         let cm = Self {
             cache_dir,
-            global_cache_dir,
             max_size_bytes,
             expiry: Duration::from_secs(expiry_hours * 3600),
             min_free_bytes: (min_free_space_gb * 1_073_741_824.0) as u64,
+            mount_id,
+            db,
         };
         tracing::info!(
             "Cache manager: dir={}, max={:.1} GB, expiry={}h, min_free={:.1} GB",
@@ -72,87 +91,73 @@ impl CacheManager {
         self.cache_dir.join(rel_path)
     }
 
+    pub fn cache_dir(&self) -> &Path {
+        &self.cache_dir
+    }
+
+    pub fn cache_db(&self) -> Arc<CacheDb> {
+        Arc::clone(&self.db)
+    }
+
+    /// Fast path: filesystem existence check. Not backed by SQLite to keep FUSE open() fast.
     pub fn is_cached(&self, rel_path: &Path) -> bool {
         let p = self.cache_path(rel_path);
         p.exists() && !p.extension().map_or(false, |e| e == "partial")
     }
 
+    /// Record a successful cache population. Called by the copier task after rename.
+    pub fn mark_cached(&self, rel_path: &Path, size_bytes: u64) {
+        self.db.mark_cached(rel_path, size_bytes, &self.mount_id);
+    }
+
+    /// Record a cache hit. Called from FUSE open() when serving from SSD.
+    pub fn mark_hit(&self, rel_path: &Path) {
+        self.db.mark_hit(rel_path, &self.mount_id);
+    }
+
+    /// Reconcile DB with the filesystem, remove .partial files.
+    /// Call once at startup before serving requests.
     pub fn startup_cleanup(&self) {
-        let removed = remove_partials(&self.cache_dir);
-        let existing = collect_cache_files(&self.cache_dir);
-        let total_bytes: u64 = existing.iter()
-            .filter_map(|p| std::fs::metadata(p).ok())
-            .map(|m| m.len())
-            .sum();
-        tracing::info!(
-            "Cache startup: {} files cached ({:.1} MB used), {} partial files removed",
-            existing.len(),
-            total_bytes as f64 / 1_048_576.0,
-            removed,
-        );
+        self.db.reconcile_with_disk(&self.cache_dir, &self.mount_id);
     }
 
     pub fn evict_if_needed(&self) {
-        let now = SystemTime::now();
         let mut expiry_count = 0u32;
         let mut size_count = 0u32;
         let mut reclaimed_bytes = 0u64;
 
-        let mut local = collect_cache_files(&self.cache_dir);
-        local.retain(|entry| {
-            if let Some(age) = atime_age(entry, now) {
-                if age > self.expiry {
-                    let file_size = std::fs::metadata(entry).map(|m| m.len()).unwrap_or(0);
-                    if let Err(e) = std::fs::remove_file(entry) {
-                        tracing::warn!("evict (expiry): failed to delete {}: {e}", entry.display());
-                    } else {
-                        tracing::info!(event = "eviction", path = %entry.display(), reason = "expired", "evict (expired): {}", entry.display());
-                        expiry_count += 1;
-                        reclaimed_bytes += file_size;
-                    }
-                    return false;
+        if !self.expiry.is_zero() {
+            for (rel_path, size) in self.db.expired_files(&self.mount_id, self.expiry.as_secs()) {
+                let abs_path = self.cache_dir.join(&rel_path);
+                if let Err(e) = std::fs::remove_file(&abs_path) {
+                    tracing::warn!("evict (expiry): failed to delete {}: {e}", abs_path.display());
+                } else {
+                    tracing::info!(event = crate::telemetry::EVENT_EVICTION, path = %abs_path.display(), reason = "expired", "evict (expired): {}", abs_path.display());
+                    self.db.remove(&rel_path, &self.mount_id);
+                    expiry_count += 1;
+                    reclaimed_bytes += size;
                 }
             }
-            true
-        });
-
-        // Measure global total across all mounts to enforce the shared budget.
-        let mut global_total: u64 = collect_cache_files(&self.global_cache_dir)
-            .iter()
-            .filter_map(|p| std::fs::metadata(p).ok())
-            .map(|m| m.len())
-            .sum();
-
-        if global_total <= self.max_size_bytes {
-            if expiry_count > 0 {
-                tracing::info!(
-                    "eviction complete: {} expired files removed ({:.1} MB reclaimed)",
-                    expiry_count,
-                    reclaimed_bytes as f64 / 1_048_576.0,
-                );
-            }
-            return;
         }
 
-        // Global budget exceeded — evict oldest files from this mount's cache dir.
-        local.sort_by_key(|p| {
-            std::fs::metadata(p)
-                .and_then(|m| m.accessed())
-                .unwrap_or(SystemTime::UNIX_EPOCH)
-        });
+        let mut global_total = self.db.total_cached_bytes_global();
 
-        for path in local {
-            if global_total <= self.max_size_bytes {
-                break;
-            }
-            let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-            if let Err(e) = std::fs::remove_file(&path) {
-                tracing::warn!("evict (size): failed to delete {}: {e}", path.display());
-            } else {
-                tracing::info!(event = "eviction", path = %path.display(), reason = "size_limit", "evict (size limit): {}", path.display());
-                size_count += 1;
-                reclaimed_bytes += size;
-                global_total = global_total.saturating_sub(size);
+        if global_total > self.max_size_bytes {
+            // LRU-ordered candidates from this mount (oldest last_hit_at first).
+            for (rel_path, size) in self.db.eviction_candidates(&self.mount_id, usize::MAX) {
+                if global_total <= self.max_size_bytes {
+                    break;
+                }
+                let abs_path = self.cache_dir.join(&rel_path);
+                if let Err(e) = std::fs::remove_file(&abs_path) {
+                    tracing::warn!("evict (size): failed to delete {}: {e}", abs_path.display());
+                } else {
+                    tracing::info!(event = crate::telemetry::EVENT_EVICTION, path = %abs_path.display(), reason = "size_limit", "evict (size limit): {}", abs_path.display());
+                    self.db.remove(&rel_path, &self.mount_id);
+                    size_count += 1;
+                    reclaimed_bytes += size;
+                    global_total = global_total.saturating_sub(size);
+                }
             }
         }
 
@@ -172,33 +177,34 @@ impl CacheManager {
             .unwrap_or(false)
     }
 
-    /// Returns the total size in bytes of all fully-cached files.
+    /// Returns the total size in bytes of all fully-cached files for this mount (DB query).
     pub fn total_cached_bytes(&self) -> u64 {
-        collect_cache_files(&self.cache_dir)
-            .iter()
-            .filter_map(|p| std::fs::metadata(p).ok())
-            .map(|m| m.len())
-            .sum()
+        self.db.total_cached_bytes(&self.mount_id)
     }
 
     /// Returns a full snapshot of cache state for TUI display.
     /// Walks the cache directory — call at low frequency (every few seconds), never from FUSE.
     pub fn stats(&self) -> CacheStats {
-        let files_raw = collect_cache_files(&self.cache_dir);
+        let files_raw = crate::utils::collect_cache_files(&self.cache_dir);
         let mut used_bytes = 0u64;
         let mut files = Vec::with_capacity(files_raw.len());
+
+        // Pull DB timestamps once (single lock, single query) rather than per-file.
+        let timestamps = self.db.file_timestamps(&self.mount_id);
 
         for abs_path in &files_raw {
             if let Ok(meta) = std::fs::metadata(abs_path) {
                 let size = meta.len();
                 used_bytes += size;
-                let atime = meta.accessed().unwrap_or(SystemTime::UNIX_EPOCH);
-                // Strip the cache_dir prefix to get the relative path for display.
                 let rel = abs_path
                     .strip_prefix(&self.cache_dir)
                     .unwrap_or(abs_path)
                     .to_path_buf();
-                files.push((rel, size, atime));
+                let (cached_at, last_hit_at) = timestamps
+                    .get(&rel)
+                    .copied()
+                    .unwrap_or((SystemTime::UNIX_EPOCH, SystemTime::UNIX_EPOCH));
+                files.push((rel, size, cached_at, last_hit_at));
             }
         }
 
@@ -212,77 +218,22 @@ impl CacheManager {
             files,
         }
     }
-
 }
 
 // ---- helpers ----
 
-fn remove_partials(dir: &Path) -> u32 {
-    let mut count = 0u32;
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                count += remove_partials(&path);
-            } else if path.extension().map_or(false, |e| e == "partial") {
-                if std::fs::remove_file(&path).is_ok() {
-                    tracing::debug!("startup_cleanup: removed {}", path.display());
-                    count += 1;
-                }
-            }
-        }
-    }
-    count
-}
-
-fn collect_cache_files(dir: &Path) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    collect_inner(dir, &mut out);
-    out
-}
-
-fn collect_inner(dir: &Path, out: &mut Vec<PathBuf>) {
-    if let Ok(entries) = std::fs::read_dir(dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.is_dir() {
-                collect_inner(&path, out);
-            } else if !path.extension().map_or(false, |e| e == "partial") {
-                out.push(path);
-            }
-        }
-    }
-}
-
-/// Age since last access. The copier preserves source mtime for getattr fidelity
-/// but sets atime to now, so atime reliably tracks cache insertion/use time.
-fn atime_age(path: &Path, now: SystemTime) -> Option<Duration> {
-    let atime = std::fs::metadata(path).ok()?.accessed().ok()?;
-    now.duration_since(atime).ok()
+fn statvfs_query(path: &Path) -> Option<libc::statvfs> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    let c = CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(c.as_ptr(), &mut stat) } == 0 { Some(stat) } else { None }
 }
 
 fn free_space_bytes(path: &Path) -> Option<u64> {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
-    let c = CString::new(path.as_os_str().as_bytes()).ok()?;
-    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
-    let rc = unsafe { libc::statvfs(c.as_ptr(), &mut stat) };
-    if rc == 0 {
-        Some(stat.f_bavail * stat.f_bsize as u64)
-    } else {
-        None
-    }
+    statvfs_query(path).map(|s| s.f_bavail * s.f_bsize as u64)
 }
 
 fn total_space_bytes(path: &Path) -> Option<u64> {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
-    let c = CString::new(path.as_os_str().as_bytes()).ok()?;
-    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
-    let rc = unsafe { libc::statvfs(c.as_ptr(), &mut stat) };
-    if rc == 0 {
-        Some(stat.f_blocks * stat.f_frsize as u64)
-    } else {
-        None
-    }
+    statvfs_query(path).map(|s| s.f_blocks * s.f_frsize as u64)
 }

@@ -5,6 +5,7 @@ use tracing::field::{Field, Visit};
 use tracing_subscriber::Layer;
 
 use super::state::{CopyProgress, DashboardState};
+use crate::telemetry;
 
 /// A `tracing::Layer` that subscribes to structured `event = "..."` fields emitted
 /// by the core code and updates `DashboardState` counters accordingly.
@@ -37,27 +38,26 @@ where
         event.record(&mut visitor);
 
         match visitor.event.as_deref() {
-            Some("fuse_open") => {
+            Some(e) if e == telemetry::EVENT_FUSE_OPEN => {
                 self.state.fuse_opens.fetch_add(1, Relaxed);
                 self.state.open_handles.fetch_add(1, Relaxed);
             }
-            Some("cache_hit") => {
+            Some(e) if e == telemetry::EVENT_CACHE_HIT => {
                 self.state.cache_hits.fetch_add(1, Relaxed);
             }
-            Some("cache_miss") => {
+            Some(e) if e == telemetry::EVENT_CACHE_MISS => {
                 self.state.cache_misses.fetch_add(1, Relaxed);
             }
-            Some("handle_closed") => {
+            Some(e) if e == telemetry::EVENT_HANDLE_CLOSED => {
                 self.state.open_handles.fetch_update(Relaxed, Relaxed, |v| Some(v.saturating_sub(1))).ok();
                 if let Some(bytes) = visitor.bytes_read {
                     self.state.bytes_read.fetch_add(bytes, Relaxed);
                 }
             }
-            Some("playback_detected") => {}
-            Some("copy_queued") => {
+            Some(e) if e == telemetry::EVENT_COPY_QUEUED => {
                 self.state.in_flight_count.fetch_add(1, Relaxed);
             }
-            Some("copy_started") => {
+            Some(e) if e == telemetry::EVENT_COPY_STARTED => {
                 if let Some(ref path_str) = visitor.path {
                     let path = std::path::PathBuf::from(path_str);
                     self.state.active_copies.lock().unwrap().insert(path.clone(), CopyProgress {
@@ -67,20 +67,20 @@ where
                     });
                 }
             }
-            Some("copy_complete") => {
+            Some(e) if e == telemetry::EVENT_COPY_COMPLETE => {
                 self.state.completed_copies.fetch_add(1, Relaxed);
                 self.remove_active_copy(&visitor.path);
             }
-            Some("copy_failed") => {
+            Some(e) if e == telemetry::EVENT_COPY_FAILED => {
                 self.state.failed_copies.fetch_add(1, Relaxed);
                 self.remove_active_copy(&visitor.path);
             }
-            Some("deferred_changed") => {
+            Some(e) if e == telemetry::EVENT_DEFERRED_CHANGED => {
                 if let Some(count) = visitor.count {
                     self.state.deferred_count.store(count, Relaxed);
                 }
             }
-            Some("budget_updated") => {
+            Some(e) if e == telemetry::EVENT_BUDGET_UPDATED => {
                 if let Some(used) = visitor.used_bytes {
                     self.state.budget_used_bytes.store(used, Relaxed);
                 }
@@ -88,10 +88,16 @@ where
                     self.state.budget_max_bytes.store(max, Relaxed);
                 }
             }
-            Some("caching_window") => {
+            Some(e) if e == telemetry::EVENT_CACHING_WINDOW => {
                 self.state.caching_allowed.store(visitor.allowed.unwrap_or(false), Relaxed);
             }
-            Some("eviction") => {}
+            Some(e) if e == telemetry::EVENT_EVICTION => {
+                match visitor.reason.as_deref() {
+                    Some("expired")    => { self.state.evictions_expired.fetch_add(1, Relaxed); }
+                    Some("size_limit") => { self.state.evictions_size.fetch_add(1, Relaxed); }
+                    _ => {}
+                }
+            }
             _ => {}
         }
     }
@@ -101,6 +107,7 @@ where
 struct EventVisitor {
     event:      Option<String>,
     path:       Option<String>,
+    reason:     Option<String>,
     bytes_read: Option<u64>,
     size_bytes: Option<u64>,
     used_bytes: Option<u64>,
@@ -112,8 +119,9 @@ struct EventVisitor {
 impl Visit for EventVisitor {
     fn record_str(&mut self, field: &Field, value: &str) {
         match field.name() {
-            "event" => self.event = Some(value.to_string()),
-            "path"  => self.path  = Some(value.to_string()),
+            "event"  => self.event  = Some(value.to_string()),
+            "path"   => self.path   = Some(value.to_string()),
+            "reason" => self.reason = Some(value.to_string()),
             _ => {}
         }
     }
@@ -136,10 +144,13 @@ impl Visit for EventVisitor {
     }
 
     fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-        // Fallback: some tracing macros emit event/path as Debug rather than &str.
+        // Fallback: some tracing macros emit fields as Debug rather than &str.
+        let s = format!("{:?}", value);
+        let s = s.trim_matches('"');
         match field.name() {
-            "event" => self.event = Some(format!("{:?}", value).trim_matches('"').to_string()),
-            "path"  => self.path  = Some(format!("{:?}", value).trim_matches('"').to_string()),
+            "event"  => self.event  = Some(s.to_string()),
+            "path"   => self.path   = Some(s.to_string()),
+            "reason" => self.reason = Some(s.to_string()),
             _ => {}
         }
     }

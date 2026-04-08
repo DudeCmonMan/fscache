@@ -174,13 +174,13 @@ fn poll_cache_stats(state: &Arc<DashboardState>, cache_managers: &[Arc<CacheMana
         if s.min_free_bytes > 0 { min_free  = s.min_free_bytes; }
         if s.expiry > Duration::ZERO { expiry = s.expiry; }
 
-        for (path, size, atime) in s.files {
-            let evicts_at = atime + expiry;
+        for (path, size, cached_at, last_hit_at) in s.files {
+            let evicts_at = last_hit_at + expiry;
             combined_files.push(CachedFileInfo {
                 path,
                 size_bytes: size,
-                atime,
-                mtime: atime, // mtime not returned by stats() — use atime as placeholder
+                cached_at,
+                last_hit_at,
                 evicts_at,
             });
         }

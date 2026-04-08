@@ -1,15 +1,15 @@
 [package]
-name = "plex_hot_cache"
+name = "f_cache"
 version = "0.1.2"
 edition = "2024"
 license = "GPL-3.0-or-later"
 
 [lib]
-name = "plex_hot_cache"
+name = "f_cache"
 path = "src/lib.rs"
 
 [[bin]]
-name = "plex-hot-cache"
+name = "f-cache"
 path = "src/main.rs"
 
 [dependencies]
@@ -32,7 +32,6 @@ futures = "0.3"
 
 [dev-dependencies]
 tempfile = "3"
-serde_json = "1.0"
 sha2 = "0.10"
 hex = "0.4"
 filetime = "0.2"

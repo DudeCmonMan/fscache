@@ -8,14 +8,14 @@ use std::time::Duration;
 
 use common::write_backing_file;
 
-use plex_hot_cache::fuse_fs::PlexHotCacheFs;
+use f_cache::fuse_fs::FCache;
 use tempfile::TempDir;
 
 fn test_fuse_config() -> fuser::Config {
     let mut config = fuser::Config::default();
     config.mount_options = vec![
         fuser::MountOption::RO,
-        fuser::MountOption::FSName("plex-hot-cache-system-test".to_string()),
+        fuser::MountOption::FSName("f-cache-system-test".to_string()),
     ];
     config.acl = fuser::SessionACL::Owner;
     config
@@ -34,7 +34,7 @@ fn lazy_unmount_keeps_open_fds_valid() {
     let content = b"streaming media content that should survive lazy unmount";
     std::fs::write(backing.path().join("movie.mkv"), content).unwrap();
 
-    let fs = PlexHotCacheFs::new(backing.path()).unwrap();
+    let fs = FCache::new(backing.path()).unwrap();
     let _session = fuser::spawn_mount2(fs, mount.path(), &test_fuse_config()).unwrap();
     std::thread::sleep(Duration::from_millis(100));
 
@@ -76,7 +76,7 @@ fn lazy_unmount_then_remount_no_conflict() {
     std::fs::write(backing.path().join("file.mkv"), content).unwrap();
 
     // First mount
-    let fs = PlexHotCacheFs::new(backing.path()).unwrap();
+    let fs = FCache::new(backing.path()).unwrap();
     let session = fuser::spawn_mount2(fs, mount.path(), &test_fuse_config()).unwrap();
     std::thread::sleep(Duration::from_millis(100));
 
@@ -105,7 +105,7 @@ fn lazy_unmount_then_remount_no_conflict() {
     std::thread::sleep(Duration::from_millis(200));
 
     // Remount on the same path
-    let fs2 = PlexHotCacheFs::new(backing.path()).unwrap();
+    let fs2 = FCache::new(backing.path()).unwrap();
     let _session2 = fuser::spawn_mount2(fs2, mount.path(), &test_fuse_config()).unwrap();
     std::thread::sleep(Duration::from_millis(100));
 
@@ -121,7 +121,7 @@ fn lazy_unmount_then_remount_no_conflict() {
 #[test]
 fn repeat_log_window_suppresses_duplicate_access_logs() {
     let backing = TempDir::new().unwrap();
-    let mut fs = PlexHotCacheFs::new(backing.path()).unwrap();
+    let mut fs = FCache::new(backing.path()).unwrap();
     fs.repeat_log_window = Duration::from_secs(60);
 
     let path = Path::new("Movies/Some Movie (2024)/movie.mkv");
@@ -150,7 +150,7 @@ fn repeat_log_window_suppresses_duplicate_access_logs() {
 #[test]
 fn repeat_log_window_zero_disables_suppression() {
     let backing = TempDir::new().unwrap();
-    let mut fs = PlexHotCacheFs::new(backing.path()).unwrap();
+    let mut fs = FCache::new(backing.path()).unwrap();
     fs.repeat_log_window = Duration::ZERO;
 
     let path = Path::new("Movies/Some Movie (2024)/movie.mkv");

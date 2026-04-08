@@ -2,32 +2,35 @@
 target_directories = ["/mnt/media"]     # One or more directories to overmount (existing SMB/NFS mounts Plex reads from)
 cache_directory = "/mnt/ssd-cache"      # SSD cache storage (NOT the FUSE mount) — each target gets a subdirectory here
 
+[preset]
+name = "plex-episode-prediction"         # Preset to use: "plex-episode-prediction" or "cache-on-miss"
+
 [plex]
-enabled = false                            # Set to true to use Plex DB for episode prediction (false = regex-only)
-db_path = "/var/lib/plexmediaserver/Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db"
+lookahead = 4                            # Episodes to cache ahead of the current one
+mode = "miss-only"                       # "miss-only" | "rolling-buffer" (keep next N always loaded)
+process_blocklist = ["Plex Media Scanner", "Plex EAE Service", "Plex Media Fingerprinter"]
+                                         # Process binary names (and their children) never allowed to trigger prediction:
+                                         # "Plex Media Scanner" — visual analysis / thumbnail generation, never streams to users
+                                         # "Plex EAE Service" — audio fingerprinting for intro/credit detection
+                                         # "Plex Media Fingerprinter" — separate audio fingerprinting binary
+                                         # "Plex Transcoder" — NOT blocked: needed for transcoded playback
 
 [cache]
-max_size_gb = 200.0                      # Total cache budget across ALL backing mounts combined (e.g. 200 GB shared between /mnt/nas1 and /mnt/nas2)
-lookahead = 4                            # Episodes to cache ahead of current
+max_size_gb = 200.0                      # Total cache budget across ALL backing mounts combined
 expiry_hours = 72                        # Delete cached files not accessed within this window
 min_free_space_gb = 10.0                 # Stop caching if SSD free space drops below this
 passthrough_mode = false                 # If true, bypass cache entirely (debug/test mode)
-trigger_strategy = "cache-miss-only"     # "cache-miss-only" or "rolling-buffer"
-max_cache_pull_per_mount_gb = 0.0        # Per-mount lookahead prediction budget — how much to pull per drive per session (0 = unlimited)
+max_cache_pull_per_mount_gb = 0.0        # Per-mount lookahead prediction budget (0 = unlimited)
 deferred_ttl_minutes = 1440             # Discard saved deferred events older than this on startup (default 24h)
-playback_threshold_secs = 10           # Seconds of active reading before triggering lookahead (0 = fire immediately on open)
-process_blocklist = ["Plex Media Scanner", "Plex EAE Service", "Plex Media Fingerprinter"]  # Process binary names (and their children) never allowed to trigger lookahead
-                                            # "Plex Media Scanner" — visual analysis / thumbnail generation, never streams to users
-                                            # "Plex EAE Service" — audio fingerprinting for intro/credit detection (spawns Transcoders that read ~12min of audio)
-                                            # "Plex Media Fingerprinter" — separate audio fingerprinting binary, may not always be a child of EAE
-                                            # "Plex Transcoder" — NOT blocked: needed for transcoded playback. Scanner/EAE/Fingerprinter children are caught via ancestor walk above.
+min_access_secs = 0                      # Minimum seconds a file must stay open before prediction triggers (0 = immediate)
+min_file_size_mb = 0                     # Skip files below this size in MB — filters metadata/subtitle noise (0 = no floor)
 
 [schedule]
 cache_window_start = "08:00"             # Allowed caching window start (HH:MM, 24h)
 cache_window_end = "02:00"               # Allowed caching window end (wraps past midnight)
 
 [logging]
-log_directory = "/var/log/plex-hot-cache"  # Directory for rolling daily log files
-console_level = "info"                     # Log level for terminal output (error/warn/info/debug/trace)
-file_level = "debug"                       # Log level for log files (captures full detail)
-repeat_log_window_secs = 300               # Suppress repeated access logs for the same file within this window (0 = disabled)
+log_directory = "/var/log/f-cache"       # Directory for rolling daily log files
+console_level = "info"                   # Log level for terminal output (error/warn/info/debug/trace)
+file_level = "debug"                     # Log level for log files (captures full detail)
+repeat_log_window_secs = 300             # Suppress repeated access logs for the same file within this window (0 = disabled)

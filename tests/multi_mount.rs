@@ -4,7 +4,7 @@ use std::time::Duration;
 use common::{
     MultiFuseHarness, write_multi_backing_file, read_multi_mount_file, collect_files,
 };
-use plex_hot_cache::utils::{mount_cache_name, validate_targets};
+use f_cache::utils::{mount_cache_name, validate_targets};
 
 // ---------------------------------------------------------------------------
 // Basic multi-mount operation
@@ -244,7 +244,7 @@ fn concurrent_reads_across_mounts() {
 
 #[test]
 fn global_eviction_respects_total_budget() {
-    use plex_hot_cache::cache::CacheManager;
+    use f_cache::cache::CacheManager;
 
     // Two mounts sharing a 2 KB global budget.  Each file is ~600 bytes,
     // so after writing 2 files to each mount (4 files total, ~2.4 KB) the
@@ -272,16 +272,41 @@ fn global_eviction_respects_total_budget() {
         .sum();
     assert!(global_total > budget_bytes, "test setup: expected to exceed budget ({global_total} bytes)");
 
-    // Run eviction on mount 0's CacheManager (which knows the global dir).
     // Re-create the manager with the same dirs and budget so we can call evict directly.
-    let mgr = CacheManager::new(
+    // Mount 0 manager shares the DB (same global_cache_dir) with mount 1's manager.
+    let mgr0 = CacheManager::new(
         harness.cache_subdir(0),
         harness.shared_cache_base.path().to_path_buf(),
         budget_gb,
         9999,
         0.0,
     );
-    mgr.evict_if_needed();
+    let mgr1 = CacheManager::new(
+        harness.cache_subdir(1),
+        harness.shared_cache_base.path().to_path_buf(),
+        budget_gb,
+        9999,
+        0.0,
+    );
+
+    // Register all files in the DB so eviction candidates are visible.
+    for (mgr, mount_idx) in [(&mgr0, 0usize), (&mgr1, 1usize)] {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        for file_idx in 0..2u32 {
+            let rel_str = format!("file{file_idx}.mkv");
+            let rel = std::path::Path::new(&rel_str);
+            mgr.mark_cached(rel, content.len() as u64);
+            // Stagger timestamps so LRU ordering is deterministic.
+            let ts = now - (mount_idx as i64 * 2 + file_idx as i64) * 10;
+            let mount_id = harness.cache_subdir(mount_idx).to_string_lossy().into_owned();
+            mgr.cache_db().set_last_hit_at_for_test(rel, &mount_id, ts);
+        }
+    }
+
+    mgr0.evict_if_needed();
 
     let after: u64 = (0..2)
         .flat_map(|i| collect_files(&harness.cache_subdir(i)))

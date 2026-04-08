@@ -4,63 +4,43 @@ use std::os::unix::ffi::OsStrExt;
 use std::os::unix::io::RawFd;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::{Duration, UNIX_EPOCH};
+
+use crate::backing_store::BackingStore;
+use crate::preset::{CachePreset, ProcessInfo};
+use crate::telemetry;
 
 use fuser::{
     Errno, FileAttr, FileType, FileHandle, FopenFlags, Generation, INodeNo, KernelConfig,
     OpenFlags, LockOwner, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyEmpty,
     ReplyEntry, ReplyOpen, Request,
 };
-use libc::{AT_EMPTY_PATH, AT_SYMLINK_NOFOLLOW};
 
 use crate::cache::CacheManager;
 use crate::inode::InodeTable;
-use crate::predictor::AccessEvent;
+use crate::action_engine::AccessEvent;
 
 /// Short TTL so the kernel re-checks after a cache file appears.
 const TTL: Duration = Duration::from_secs(1);
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum TriggerStrategy {
-    /// Fire an AccessEvent only on a cache miss. Hits mean lookahead is working.
-    CacheMissOnly,
-    /// Fire an AccessEvent on every access, keeping the lookahead window topped up.
-    RollingBuffer,
-}
-
-/// Per-file-handle state for deferred playback detection and bytes-read tracking.
-struct OpenFileState {
-    path: PathBuf,
-    opened_at: Instant,
-    event_sent: bool,
-    /// Accumulated bytes read through this handle; emitted as a single tracing event on release.
-    bytes_read: u64,
-}
-
-pub struct PlexHotCacheFs {
+pub struct FCache {
     /// O_PATH fd opened to target_directory *before* the FUSE overmount.
-    pub backing_fd: RawFd,
+    pub backing_store: Arc<BackingStore>,
     inodes: Arc<Mutex<InodeTable>>,
     pub passthrough_mode: bool,
     pub cache: Option<Arc<CacheManager>>,
     pub access_tx: Option<tokio::sync::mpsc::UnboundedSender<AccessEvent>>,
     pub repeat_log_window: Duration,
-    pub trigger_strategy: TriggerStrategy,
-    /// How long a file must be actively read before the predictor is notified.
-    /// Zero means fire immediately on open() — preserves legacy behavior and is
-    /// the right default for tests. Set to ~10s in production to filter out Plex
-    /// Media Scanner's sub-second header probes from real user playback.
-    /// Alternative to time: count bytes read per handle; useful if disk speed
-    /// variability causes the time threshold to behave unexpectedly.
-    pub playback_threshold: Duration,
-    /// Process binary names that are never allowed to trigger lookahead prediction.
-    /// Checked via /proc/<pid>/exe on each open(). Empty list = no blocking.
-    pub process_blocklist: Vec<String>,
-    recent_logs: Mutex<HashMap<PathBuf, Instant>>,
-    open_files: Mutex<HashMap<u64, OpenFileState>>,
+    /// Optional preset that controls open-time filtering and future caching actions.
+    pub preset: Option<Arc<dyn CachePreset>>,
+    recent_logs: Mutex<HashMap<PathBuf, std::time::Instant>>,
+    /// Bytes read per open file handle — emitted as telemetry on release.
+    open_bytes: Mutex<HashMap<u64, u64>>,
+    /// Path for each open file handle — used to send on_close events.
+    open_paths: Mutex<HashMap<u64, PathBuf>>,
 }
 
-impl PlexHotCacheFs {
+impl FCache {
     /// MUST be called before mounting FUSE over `backing_path`.
     pub fn new(backing_path: &Path) -> anyhow::Result<Self> {
         let c_path = CString::new(backing_path.as_os_str().as_bytes())
@@ -77,19 +57,18 @@ impl PlexHotCacheFs {
             ));
         }
 
-        tracing::debug!("Opened O_PATH fd {} for {}", fd, backing_path.display());
+        tracing::debug!("Opened backing store O_PATH fd for {}", backing_path.display());
         Ok(Self {
-            backing_fd: fd,
+            backing_store: Arc::new(BackingStore::new(fd)),
             inodes: Arc::new(Mutex::new(InodeTable::new())),
             passthrough_mode: false,
             cache: None,
             access_tx: None,
             repeat_log_window: Duration::from_secs(60),
-            trigger_strategy: TriggerStrategy::CacheMissOnly,
-            playback_threshold: Duration::ZERO,
-            process_blocklist: Vec::new(),
+            preset: None,
             recent_logs: Mutex::new(HashMap::new()),
-            open_files: Mutex::new(HashMap::new()),
+            open_bytes: Mutex::new(HashMap::new()),
+            open_paths: Mutex::new(HashMap::new()),
         })
     }
 
@@ -99,7 +78,7 @@ impl PlexHotCacheFs {
         if self.repeat_log_window.is_zero() {
             return false;
         }
-        let now = Instant::now();
+        let now = std::time::Instant::now();
         let mut recent = self.recent_logs.lock().unwrap();
         if recent.len() > 1000 {
             recent.retain(|_, last| now.duration_since(*last) < self.repeat_log_window);
@@ -113,38 +92,8 @@ impl PlexHotCacheFs {
         }
     }
 
-    // ---- backing store helpers ----
-
-    /// Directories are never cached, so this naturally falls through to stat_backing for them.
-    fn stat_cached(&self, rel_path: &Path) -> Option<libc::stat> {
-        if self.passthrough_mode {
-            return None;
-        }
-        let cache = self.cache.as_ref()?;
-        if !cache.is_cached(rel_path) {
-            return None;
-        }
-        let cache_path = cache.cache_path(rel_path);
-        let c = path_to_cstring_abs(&cache_path);
-        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-        let rc = unsafe { libc::lstat(c.as_ptr(), &mut stat) };
-        if rc == 0 { Some(stat) } else { None }
-    }
-
     fn stat_backing(&self, rel_path: &Path) -> Option<libc::stat> {
-        let mut stat: libc::stat = unsafe { std::mem::zeroed() };
-        let rc = if rel_path == Path::new("") {
-            let empty = CString::new("").unwrap();
-            unsafe {
-                libc::fstatat(self.backing_fd, empty.as_ptr(), &mut stat, AT_EMPTY_PATH)
-            }
-        } else {
-            let c = path_to_cstring(rel_path);
-            unsafe {
-                libc::fstatat(self.backing_fd, c.as_ptr(), &mut stat, AT_SYMLINK_NOFOLLOW)
-            }
-        };
-        if rc == 0 { Some(stat) } else { None }
+        self.backing_store.stat(rel_path)
     }
 
     fn stat_to_attr(&self, ino: u64, s: &libc::stat) -> FileAttr {
@@ -242,109 +191,7 @@ impl PlexHotCacheFs {
     }
 }
 
-impl Drop for PlexHotCacheFs {
-    fn drop(&mut self) {
-        unsafe { libc::close(self.backing_fd) };
-    }
-}
-
-/// Returns None if the process has exited or the exe link is unreadable.
-fn process_name(pid: u32) -> Option<String> {
-    let exe = std::fs::read_link(format!("/proc/{}/exe", pid)).ok()?;
-    exe.file_name()?.to_str().map(|s| s.to_string())
-}
-
-fn parent_pid(pid: u32) -> Option<u32> {
-    let status = std::fs::read_to_string(format!("/proc/{}/status", pid)).ok()?;
-    for line in status.lines() {
-        if let Some(ppid_str) = line.strip_prefix("PPid:\t") {
-            return ppid_str.trim().parse().ok();
-        }
-    }
-    None
-}
-
-/// Catches child processes spawned by a blocklisted process — e.g. Plex Transcoder
-/// spawned by Plex Media Scanner for intro/credit analysis.
-/// Returns a human-readable reason string if blocked, or None if not blocked.
-fn is_blocked_process(pid: u32, blocklist: &[String]) -> Option<&'static str> {
-    // Plex-specific: always check if this is a detection transcoder regardless of
-    // the user blocklist. Detection runs use non-streaming output formats (-f flac,
-    // -f null, -f image2, etc.) or write to /Transcode/Detection/ — never -f dash/
-    // ssegment/mpegts. This lives here rather than in config because "Plex Transcoder"
-    // serves dual purposes and cannot be blanket-blocklisted.
-    if is_plex_detection_transcoder(pid) {
-        return Some("detection transcoder");
-    }
-
-    let mut current = pid;
-    for _ in 0..16 {
-        if current <= 1 {
-            return None;
-        }
-        if let Some(name) = process_name(current) {
-            if blocklist.iter().any(|b| name == *b) {
-                return Some("blocklisted process");
-            }
-        }
-        match parent_pid(current) {
-            Some(ppid) if ppid != current => current = ppid,
-            _ => return None,
-        }
-    }
-    None
-}
-
-/// Plex Transcoder serves dual purposes: real playback AND intro/credit/thumbnail detection.
-/// Playback always uses a streaming output format (-f dash, ssegment, mpegts).
-/// Detection uses non-streaming formats (-f flac, null, chromaprint, image2) and/or
-/// writes to /Transcode/Detection/. A secondary -f null (e.g. subtitle extraction) on
-/// a playback transcode is overridden by the presence of a streaming format.
-fn is_plex_detection_transcoder(pid: u32) -> bool {
-    let name = match process_name(pid) {
-        Some(n) => n,
-        None => return false,
-    };
-    if name != "Plex Transcoder" {
-        return false;
-    }
-    let cmdline = match std::fs::read(format!("/proc/{}/cmdline", pid)) {
-        Ok(bytes) => bytes,
-        Err(_) => return false,
-    };
-    let args: Vec<&[u8]> = cmdline.split(|&b| b == 0).collect();
-
-    if has_streaming_output(&args) {
-        return false;
-    }
-    has_analysis_output(&args) || has_detection_output_path(&cmdline)
-}
-
-const STREAMING_FORMATS: &[&[u8]] = &[b"dash", b"ssegment", b"mpegts"];
-const ANALYSIS_FORMATS: &[&[u8]] = &[b"null", b"chromaprint", b"flac", b"image2"];
-
-/// Real playback always uses one of these streaming container formats.
-fn has_streaming_output(args: &[&[u8]]) -> bool {
-    args.windows(2).any(|pair| {
-        pair[0] == b"-f" && STREAMING_FORMATS.contains(&pair[1])
-    })
-}
-
-/// Detection transcoders use non-streaming output formats.
-fn has_analysis_output(args: &[&[u8]]) -> bool {
-    args.windows(2).any(|pair| {
-        pair[0] == b"-f" && ANALYSIS_FORMATS.contains(&pair[1])
-    })
-}
-
-/// Detection transcoders write to /Transcode/Detection/ — catches future analysis
-/// modes that may use formats not yet in ANALYSIS_FORMATS.
-fn has_detection_output_path(cmdline: &[u8]) -> bool {
-    cmdline.windows(b"/Transcode/Detection/".len())
-        .any(|w| w == b"/Transcode/Detection/")
-}
-
-impl Filesystem for PlexHotCacheFs {
+impl Filesystem for FCache {
     fn init(&mut self, _req: &Request, _config: &mut KernelConfig) -> std::io::Result<()> {
         tracing::info!("FUSE filesystem initialized");
         Ok(())
@@ -366,7 +213,7 @@ impl Filesystem for PlexHotCacheFs {
             parent_path.join(name)
         };
 
-        let Some(stat) = self.stat_cached(&child_path).or_else(|| self.stat_backing(&child_path)) else {
+        let Some(stat) = self.stat_backing(&child_path) else {
             reply.error(Errno::ENOENT);
             return;
         };
@@ -385,8 +232,7 @@ impl Filesystem for PlexHotCacheFs {
             Some(p) => p.to_path_buf(),
             None => { reply.error(Errno::ENOENT); return; }
         };
-        // Avoids waking backing drives (spinning rust, NFS) for files already on SSD.
-        let Some(stat) = self.stat_cached(&path).or_else(|| self.stat_backing(&path)) else {
+        let Some(stat) = self.stat_backing(&path) else {
             reply.error(Errno::ENOENT);
             return;
         };
@@ -405,33 +251,24 @@ impl Filesystem for PlexHotCacheFs {
         };
 
         let suppress = self.should_suppress_log(&path);
-        let deferred = !self.playback_threshold.is_zero();
 
-        let block_reason = if !self.process_blocklist.is_empty() {
-            is_blocked_process(req.pid(), &self.process_blocklist)
-        } else {
-            None
-        };
-        if let Some(reason) = block_reason {
-            tracing::debug!(
-                "process_blocklist: blocked pid {} ({:?}) as {reason} on {:?}",
-                req.pid(), process_name(req.pid()).unwrap_or_default(), path
-            );
-        }
-
-        // RollingBuffer immediate mode: fire event before the cache check.
-        if self.trigger_strategy == TriggerStrategy::RollingBuffer && !deferred && block_reason.is_none() {
-            if let Some(ref tx) = self.access_tx {
-                if suppress {
-                    tracing::debug!("plex access: {:?}", path);
-                } else {
-                    tracing::info!("plex access: {:?}", path);
-                }
-                let _ = tx.send(AccessEvent { relative_path: path.clone() });
+        let (filtered, opener_name) = if let Some(ref preset) = self.preset {
+            let process = ProcessInfo::capture(req.pid());
+            let name = process.name.clone();
+            if preset.should_filter(&process) {
+                tracing::debug!(
+                    "preset filtered pid {} ({}) on {:?}",
+                    req.pid(), name.as_deref().unwrap_or("?"), path
+                );
+                (true, name)
+            } else {
+                (false, name)
             }
-        }
+        } else {
+            (false, None)
+        };
 
-        tracing::debug!(event = "fuse_open", path = %path.display(), "fuse open");
+        tracing::debug!(event = telemetry::EVENT_FUSE_OPEN, path = %path.display(), "fuse open");
 
         if !self.passthrough_mode {
             if let Some(ref cache) = self.cache {
@@ -440,21 +277,18 @@ impl Filesystem for PlexHotCacheFs {
                     let c = path_to_cstring_abs(&cache_path);
                     let fd = unsafe { libc::open(c.as_ptr(), libc::O_RDONLY) };
                     if fd >= 0 {
-                        if suppress {
-                            tracing::debug!(event = "cache_hit", path = %path.display(), "cache HIT: {:?} (serving from SSD)", path);
-                        } else {
-                            tracing::info!(event = "cache_hit", path = %path.display(), "cache HIT: {:?} (serving from SSD)", path);
+                        // Always log cache hits at INFO — they confirm the cache is working
+                        // and should never be suppressed by the repeat log window.
+                        tracing::info!(event = telemetry::EVENT_CACHE_HIT, path = %path.display(), "cache HIT: {:?} (serving from SSD)", path);
+                        // Update LRU timestamp in DB (non-blocking; best-effort).
+                        cache.mark_hit(&path);
+                        if !filtered {
+                            if let Some(ref tx) = self.access_tx {
+                                let _ = tx.send(AccessEvent::hit(path.clone()));
+                            }
+                            self.open_paths.lock().unwrap().insert(fd as u64, path.clone());
                         }
-                        // RollingBuffer deferred: track cache-hit handles too so the
-                        // predictor is notified once sustained playback is confirmed.
-                        if deferred && block_reason.is_none() && self.trigger_strategy == TriggerStrategy::RollingBuffer {
-                            self.open_files.lock().unwrap().insert(fd as u64, OpenFileState {
-                                path: path.clone(),
-                                opened_at: Instant::now(),
-                                event_sent: false,
-                                bytes_read: 0,
-                            });
-                        }
+                        self.open_bytes.lock().unwrap().insert(fd as u64, 0);
                         reply.opened(FileHandle(fd as u64), FopenFlags::empty());
                         return;
                     }
@@ -464,36 +298,28 @@ impl Filesystem for PlexHotCacheFs {
             }
         }
 
-        let c_path = path_to_cstring(&path);
-        let fd = unsafe { libc::openat(self.backing_fd, c_path.as_ptr(), libc::O_RDONLY) };
+        let fd = match self.backing_store.open_file(&path) {
+            Ok(fd) => fd,
+            Err(_) => { reply.error(Errno::from_i32(last_errno())); return; }
+        };
 
-        if fd < 0 {
-            reply.error(Errno::from_i32(last_errno()));
-            return;
-        }
-
-        if let Some(reason) = block_reason {
-            tracing::info!("ignored process access: {:?} ({reason}, not caching)", path);
+        let opener = opener_name.as_deref().unwrap_or("?");
+        if filtered {
+            tracing::info!("ignored process access: {:?} (filtered by preset, not caching) [opener: {} pid={}]", path, opener, req.pid());
         } else if suppress {
-            tracing::debug!(event = "cache_miss", path = %path.display(), "cache MISS: {:?} (serving from backing store)", path);
+            tracing::debug!(event = telemetry::EVENT_CACHE_MISS, path = %path.display(), "cache MISS: {:?} (serving from backing store) [opener: {} pid={}]", path, opener, req.pid());
         } else {
-            tracing::info!(event = "cache_miss", path = %path.display(), "cache MISS: {:?} (serving from backing store)", path);
+            tracing::info!(event = telemetry::EVENT_CACHE_MISS, path = %path.display(), "cache MISS: {:?} (serving from backing store) [opener: {} pid={}]", path, opener, req.pid());
         }
 
-        if deferred && block_reason.is_none() {
-            self.open_files.lock().unwrap().insert(fd as u64, OpenFileState {
-                path: path.clone(),
-                opened_at: Instant::now(),
-                event_sent: false,
-                bytes_read: 0,
-            });
-        } else if block_reason.is_none() && self.trigger_strategy == TriggerStrategy::CacheMissOnly {
-            // Immediate mode: notify predictor on miss — hits mean lookahead is working.
+        if !filtered && !self.passthrough_mode {
             if let Some(ref tx) = self.access_tx {
-                let _ = tx.send(AccessEvent { relative_path: path.clone() });
+                let _ = tx.send(AccessEvent::miss(path.clone()));
             }
+            self.open_paths.lock().unwrap().insert(fd as u64, path.clone());
         }
 
+        self.open_bytes.lock().unwrap().insert(fd as u64, 0);
         reply.opened(FileHandle(fd as u64), FopenFlags::empty());
     }
 
@@ -523,21 +349,9 @@ impl Filesystem for PlexHotCacheFs {
         }
         buf.truncate(n as usize);
 
-        // Deferred playback detection: fire once the handle has been open for `playback_threshold`.
-        if !self.playback_threshold.is_zero() {
-            if let Some(ref tx) = self.access_tx {
-                let mut map = self.open_files.lock().unwrap();
-                if let Some(state) = map.get_mut(&(fh.0)) {
-                    state.bytes_read += n as u64;
-                    if !state.event_sent && state.opened_at.elapsed() >= self.playback_threshold {
-                        state.event_sent = true;
-                        let path = state.path.clone();
-                        drop(map);
-                        tracing::info!(event = "playback_detected", path = %path.display(), "playback detected: {:?}", path);
-                        let _ = tx.send(AccessEvent { relative_path: path });
-                    }
-                }
-            }
+        // Accumulate bytes read for telemetry emitted on release.
+        if let Some(bytes) = self.open_bytes.lock().unwrap().get_mut(&fh.0) {
+            *bytes += n as u64;
         }
 
         reply.data(&buf);
@@ -553,11 +367,12 @@ impl Filesystem for PlexHotCacheFs {
         _flush: bool,
         reply: ReplyEmpty,
     ) {
-        let bytes_read = self.open_files.lock().unwrap()
-            .remove(&(fh.0))
-            .map(|s| s.bytes_read)
-            .unwrap_or(0);
-        tracing::debug!(event = "handle_closed", bytes_read, "handle closed");
+        let bytes_read = self.open_bytes.lock().unwrap().remove(&fh.0).unwrap_or(0);
+        let path = self.open_paths.lock().unwrap().remove(&fh.0);
+        tracing::debug!(event = telemetry::EVENT_HANDLE_CLOSED, bytes_read, "handle closed");
+        if let (Some(path), Some(tx)) = (path, &self.access_tx) {
+            let _ = tx.send(AccessEvent::close(path, bytes_read));
+        }
         unsafe { libc::close(fh.0 as RawFd) };
         reply.ok();
     }
@@ -576,7 +391,7 @@ impl Filesystem for PlexHotCacheFs {
             path_to_cstring(&path)
         };
         let fd = unsafe {
-            libc::openat(self.backing_fd, c_path.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY)
+            libc::openat(self.backing_store.fd(), c_path.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY)
         };
 
         if fd < 0 {
@@ -637,7 +452,7 @@ impl Filesystem for PlexHotCacheFs {
         let mut buf = vec![0u8; libc::PATH_MAX as usize];
         let len = unsafe {
             libc::readlinkat(
-                self.backing_fd,
+                self.backing_store.fd(),
                 c_path.as_ptr(),
                 buf.as_mut_ptr() as *mut libc::c_char,
                 buf.len(),
@@ -656,7 +471,7 @@ impl Filesystem for PlexHotCacheFs {
         // Open a real fd to "." relative to the backing dir for the call.
         let dot = CString::new(".").unwrap();
         let real_fd = unsafe {
-            libc::openat(self.backing_fd, dot.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY)
+            libc::openat(self.backing_store.fd(), dot.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY)
         };
         if real_fd < 0 {
             reply.error(Errno::from_i32(last_errno()));
@@ -681,8 +496,6 @@ impl Filesystem for PlexHotCacheFs {
         );
     }
 }
-
-// ---- helpers ----
 
 fn path_to_cstring(path: &Path) -> CString {
     let bytes = path.as_os_str().as_bytes();
@@ -714,108 +527,3 @@ fn mode_to_filetype(mode: libc::mode_t) -> FileType {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn split(cmdline: &[u8]) -> Vec<&[u8]> {
-        cmdline.split(|&b| b == 0).collect()
-    }
-
-    #[test]
-    fn detection_null_output() {
-        let cmdline = b"Plex Transcoder\0-i\0input.mkv\0-vn\0-f\0null\0-";
-        assert!(has_analysis_output(&split(cmdline)));
-        assert!(!has_streaming_output(&split(cmdline)));
-    }
-
-    #[test]
-    fn detection_chromaprint_output() {
-        let cmdline = b"Plex Transcoder\0-i\0input.mkv\0-f\0chromaprint\0-";
-        assert!(has_analysis_output(&split(cmdline)));
-        assert!(!has_streaming_output(&split(cmdline)));
-    }
-
-    // Credits detection transcoder: has -progressurl but is NOT playback.
-    // Primary output is -f flac to /dev/shm/Transcode/Detection/, secondary -f null.
-    // Previously this slipped through the -progressurl gate — caught by format check now.
-    #[test]
-    fn detection_flac_with_progressurl() {
-        let cmdline = b"Plex Transcoder\0-i\0input.mkv\
-            \0-progressurl\0http://127.0.0.1:32400/.../progress\
-            \0-codec:0\0flac\0-f\0flac\
-            \0/dev/shm/Transcode/Detection/abc123\
-            \0-f\0null\0nullfile";
-        assert!(!has_streaming_output(&split(cmdline)));
-        assert!(has_analysis_output(&split(cmdline)));
-        assert!(has_detection_output_path(cmdline));
-    }
-
-    #[test]
-    fn detection_image2_thumbnails() {
-        let cmdline = b"Plex Transcoder\0-i\0input.mkv\
-            \0-skip_frame\0noref\0-vf\0fps=0.5,scale=w=320:h=320\
-            \0-f\0image2\0thumb-%05d.jpeg";
-        assert!(!has_streaming_output(&split(cmdline)));
-        assert!(has_analysis_output(&split(cmdline)));
-    }
-
-    // Path check catches analysis even when format is unrecognized.
-    #[test]
-    fn detection_output_path() {
-        let cmdline = b"Plex Transcoder\0-i\0input.mkv\
-            \0-f\0someunknownformat\
-            \0/dev/shm/Transcode/Detection/abc123";
-        assert!(!has_streaming_output(&split(cmdline)));
-        assert!(!has_analysis_output(&split(cmdline))); // format unknown
-        assert!(has_detection_output_path(cmdline));    // but path catches it
-    }
-
-    // Bug case: playback with secondary -f null for subtitle extraction.
-    // The -f dash streaming format takes precedence.
-    #[test]
-    fn playback_dash_with_secondary_null_not_detection() {
-        let cmdline = b"Plex Transcoder\0-i\0input.mkv\
-            \0-progressurl\0http://127.0.0.1:32400/.../progress\
-            \0-f\0dash\0manifest.mpd\
-            \0-map\x000:2\0-f\0null\0-codec\0ass\0nullfile";
-        assert!(has_streaming_output(&split(cmdline)));
-        assert!(has_analysis_output(&split(cmdline))); // secondary -f null present
-    }
-
-    #[test]
-    fn playback_dash_not_detection() {
-        let cmdline = b"Plex Transcoder\0-i\0input.mkv\
-            \0-progressurl\0http://127.0.0.1:32400/.../progress\
-            \0-f\0dash\0manifest.mpd";
-        assert!(has_streaming_output(&split(cmdline)));
-        assert!(!has_analysis_output(&split(cmdline)));
-    }
-
-    #[test]
-    fn playback_ssegment_not_detection() {
-        let cmdline = b"Plex Transcoder\0-i\0input.mkv\
-            \0-progressurl\0http://127.0.0.1:32400/.../progress\
-            \0-f\0ssegment\0-segment_format\0mp4\0media-%05d.ts";
-        assert!(has_streaming_output(&split(cmdline)));
-        assert!(!has_analysis_output(&split(cmdline)));
-    }
-
-    #[test]
-    fn playback_mpegts_not_detection() {
-        let cmdline = b"Plex Transcoder\0-i\0input.ts\
-            \0-progressurl\0http://127.0.0.1:32400/.../progress\
-            \0-f\0mpegts\0pipe:1";
-        assert!(has_streaming_output(&split(cmdline)));
-        assert!(!has_analysis_output(&split(cmdline)));
-    }
-
-    // Unknown purpose, no recognized signals → not detection (conservative default).
-    #[test]
-    fn unknown_transcoder_not_detection() {
-        let cmdline = b"Plex Transcoder\0-i\0input.mkv\0-codec\0copy\0output.mkv";
-        assert!(!has_streaming_output(&split(cmdline)));
-        assert!(!has_analysis_output(&split(cmdline)));
-        assert!(!has_detection_output_path(cmdline));
-    }
-}

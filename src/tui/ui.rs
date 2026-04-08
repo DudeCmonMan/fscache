@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::atomic::Ordering::Relaxed;
 use std::time::{Duration, SystemTime};
 
@@ -5,7 +7,7 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Gauge, List, ListItem, Paragraph, Row, Table};
+use ratatui::widgets::{Block, Borders, Clear, Gauge, List, ListItem, Paragraph, Row, Table};
 
 use super::state::{CacheSort, DashboardState, Page};
 
@@ -18,6 +20,9 @@ pub fn render(
     log_scroll: usize,
     cache_sel: usize,
     cache_sort: CacheSort,
+    checked: &HashSet<PathBuf>,
+    menu: Option<usize>,
+    status_msg: Option<&str>,
 ) {
     let area = f.area();
 
@@ -30,7 +35,12 @@ pub fn render(
 
     match page {
         Page::Status => render_status(f, chunks[1], state),
-        Page::Cache  => render_cache(f, chunks[1], state, cache_sel, cache_sort),
+        Page::Cache  => {
+            render_cache(f, chunks[1], state, cache_sel, cache_sort, checked, status_msg);
+            if let Some(sel) = menu {
+                render_action_menu(f, chunks[1], sel);
+            }
+        }
         Page::Logs   => render_logs(f, chunks[1], state, log_scroll),
     }
 }
@@ -73,11 +83,11 @@ fn render_tab_bar(f: &mut Frame, area: Rect, active: Page) {
 
 fn render_status(f: &mut Frame, area: Rect, state: &DashboardState) {
     let rows = Layout::vertical([
-        Constraint::Length(5),  // Row 1: Scheduler + Cache Budget (fixed)
-        Constraint::Length(3),  // Row 2: Predictor (fixed)
-        Constraint::Length(4),  // Row 3: Mounts (capped)
-        Constraint::Min(5),     // Row 4: Activity (flexible)
-        Constraint::Length(7),  // Row 5: Recent Logs (fixed 5 + border)
+        Constraint::Length(5),
+        Constraint::Length(3),
+        Constraint::Length(4),
+        Constraint::Min(5),
+        Constraint::Length(7),
     ]).split(area);
 
     render_scheduler_and_cache(f, rows[0], state);
@@ -263,15 +273,23 @@ fn render_recent_logs(f: &mut Frame, area: Rect, state: &DashboardState) {
 
 // ---- Page 2: Cache ----
 
-fn render_cache(f: &mut Frame, area: Rect, state: &DashboardState, sel: usize, sort: CacheSort) {
+fn render_cache(
+    f: &mut Frame,
+    area: Rect,
+    state: &DashboardState,
+    sel: usize,
+    sort: CacheSort,
+    checked: &HashSet<PathBuf>,
+    status_msg: Option<&str>,
+) {
     let chunks = Layout::vertical([
         Constraint::Percentage(60),
         Constraint::Percentage(40),
     ]).split(area);
 
     let files = sorted_files(state, sort);
-    render_cache_list(f, chunks[0], &files, sel, sort, state.cache_used_bytes.load(Relaxed));
-    render_cache_detail(f, chunks[1], &files, sel, state);
+    render_cache_list(f, chunks[0], &files, sel, sort, state.cache_used_bytes.load(Relaxed), checked);
+    render_cache_detail(f, chunks[1], &files, sel, state, checked, status_msg);
 }
 
 fn sorted_files(state: &DashboardState, sort: CacheSort) -> Vec<super::state::CachedFileInfo> {
@@ -282,6 +300,7 @@ fn sorted_files(state: &DashboardState, sort: CacheSort) -> Vec<super::state::Ca
             cached_at:   f.cached_at,
             last_hit_at: f.last_hit_at,
             evicts_at:   f.evicts_at,
+            mount_id:    f.mount_id.clone(),
         }
     }).collect::<Vec<_>>();
 
@@ -295,8 +314,15 @@ fn sorted_files(state: &DashboardState, sort: CacheSort) -> Vec<super::state::Ca
     files
 }
 
-fn render_cache_list(f: &mut Frame, area: Rect, files: &[super::state::CachedFileInfo], sel: usize, sort: CacheSort, total_bytes: u64) {
-    // Scroll offset keeps selection visible with a 3-row margin from the bottom.
+fn render_cache_list(
+    f: &mut Frame,
+    area: Rect,
+    files: &[super::state::CachedFileInfo],
+    sel: usize,
+    sort: CacheSort,
+    total_bytes: u64,
+    checked: &HashSet<PathBuf>,
+) {
     let visible_rows = (area.height as usize).saturating_sub(4).max(1);
     let max_scroll = files.len().saturating_sub(visible_rows);
     let scroll = if files.len() <= visible_rows {
@@ -307,32 +333,44 @@ fn render_cache_list(f: &mut Frame, area: Rect, files: &[super::state::CachedFil
         0
     };
 
-    let title = format!(
-        " Cached Files   sort: [{}]   {} files   {:.1} GB ",
-        sort.label(), files.len(), gb(total_bytes)
-    );
+    let checked_count = checked.len();
+    let title = if checked_count > 0 {
+        format!(
+            " Cached Files   sort: [{}]   {} files   {:.1} GB   {} selected   │  Space: toggle  Shift+↑↓: range  Enter: actions ",
+            sort.label(), files.len(), gb(total_bytes), checked_count
+        )
+    } else {
+        format!(
+            " Cached Files   sort: [{}]   {} files   {:.1} GB   │  Space: select  Enter: actions  s: sort ",
+            sort.label(), files.len(), gb(total_bytes)
+        )
+    };
 
-    let header = Row::new(vec!["File", "Size", "Cached At", "Evicts In"])
+    let header = Row::new(vec!["  ", "File", "Size", "Cached At", "Evicts In"])
         .style(Style::default().add_modifier(Modifier::BOLD | Modifier::UNDERLINED));
 
     let rows: Vec<Row> = files.iter().enumerate().skip(scroll).take(visible_rows).map(|(i, f)| {
-        let marker = if i == sel { "▸ " } else { "  " };
-        let name = format!("{}{}", marker, f.path.display());
-        let size = fmt_bytes(f.size_bytes);
-        let cached_at = fmt_time(f.cached_at);
-        let evicts_in = fmt_duration_until(f.evicts_at);
-        let style = if i == sel {
+        let is_sel     = i == sel;
+        let is_checked = checked.contains(&f.path);
+        let marker  = if is_sel { "▸" } else { " " };
+        let checkbox = if is_checked { "[x]" } else { "[ ]" };
+        let name    = format!("{} {}", marker, f.path.display());
+        let size    = fmt_bytes(f.size_bytes);
+        let cached_at  = fmt_time(f.cached_at);
+        let evicts_in  = fmt_duration_until(f.evicts_at);
+        let style = if is_sel {
             Style::default().bg(Color::DarkGray)
         } else {
             Style::default()
         };
-        Row::new(vec![name, size, cached_at, evicts_in]).style(style)
+        Row::new(vec![checkbox.to_string(), name, size, cached_at, evicts_in]).style(style)
     }).collect();
 
     let table = Table::new(
         rows,
         [
-            Constraint::Percentage(60),
+            Constraint::Length(5),
+            Constraint::Min(20),
             Constraint::Length(10),
             Constraint::Length(10),
             Constraint::Length(10),
@@ -344,13 +382,22 @@ fn render_cache_list(f: &mut Frame, area: Rect, files: &[super::state::CachedFil
     f.render_widget(table, area);
 }
 
-fn render_cache_detail(f: &mut Frame, area: Rect, files: &[super::state::CachedFileInfo], sel: usize, state: &DashboardState) {
-    let lines = if let Some(f) = files.get(sel) {
+fn render_cache_detail(
+    f: &mut Frame,
+    area: Rect,
+    files: &[super::state::CachedFileInfo],
+    sel: usize,
+    state: &DashboardState,
+    checked: &HashSet<PathBuf>,
+    status_msg: Option<&str>,
+) {
+    let title = " Details ";
+
+    let mut lines = if let Some(f) = files.get(sel) {
         let mount = state.mounts.lock().unwrap()
             .first()
             .map(|m| m.target.display().to_string())
             .unwrap_or_else(|| "—".to_string());
-        let cache_path = f.path.display().to_string();
         vec![
             Line::from(format!(" File:       {}", f.path.display())),
             Line::from(format!(" Mount:      {}", mount)),
@@ -358,15 +405,51 @@ fn render_cache_detail(f: &mut Frame, area: Rect, files: &[super::state::CachedF
             Line::from(format!(" Cached at:  {}  ({})", fmt_datetime(f.cached_at), fmt_relative(f.cached_at))),
             Line::from(format!(" Last read:  {}  ({})", fmt_datetime(f.last_hit_at), fmt_relative(f.last_hit_at))),
             Line::from(format!(" Evicts in:  {}  ({})", fmt_duration_until(f.evicts_at), fmt_datetime(f.evicts_at))),
-            Line::from(format!(" Cache path: {}", cache_path)),
         ]
     } else {
         vec![Line::from(" No files cached.")]
     };
 
+    // Flash message at the bottom of the detail panel when an action is in flight.
+    if let Some(msg) = status_msg {
+        lines.push(Line::from(""));
+        lines.push(Line::from(Span::styled(
+            format!(" ⏳ {}", msg),
+            Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        )));
+    }
+
     f.render_widget(
-        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" Details ")),
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(title)),
         area,
+    );
+}
+
+/// Centered popup with two action items (Evict / Refresh Lease).
+fn render_action_menu(f: &mut Frame, area: Rect, sel: usize) {
+    const MENU_W: u16 = 30;
+    const MENU_H: u16 = 6;
+
+    let x = area.x + area.width.saturating_sub(MENU_W) / 2;
+    let y = area.y + area.height.saturating_sub(MENU_H) / 2;
+    let popup = Rect { x, y, width: MENU_W.min(area.width), height: MENU_H.min(area.height) };
+
+    f.render_widget(Clear, popup);
+
+    let items = ["Evict files", "Refresh lease"];
+    let list_items: Vec<ListItem> = items.iter().enumerate().map(|(i, label)| {
+        let style = if i == sel {
+            Style::default().bg(Color::Cyan).fg(Color::Black).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        ListItem::new(Line::from(Span::styled(format!("  {}  ", label), style)))
+    }).collect();
+
+    f.render_widget(
+        List::new(list_items)
+            .block(Block::default().borders(Borders::ALL).title(" Action  (↑↓ Enter Esc) ")),
+        popup,
     );
 }
 

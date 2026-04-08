@@ -192,6 +192,8 @@ async fn run_daemon(config_path: Option<PathBuf>) -> anyhow::Result<()> {
         shutdown_tx.clone(),
         shutdown_rx.clone(),
         recent_logs,
+        Arc::clone(&db),
+        base_cache_dir.clone(),
     ));
 
     tracing::info!(

@@ -35,6 +35,19 @@ pub struct HelloPayload {
 pub enum ClientMessage {
     /// Ctrl+Q in TUI sends this to trigger clean daemon shutdown.
     Shutdown,
+    /// Evict specific files from the cache (delete from disk + DB).
+    EvictFiles { files: Vec<FileTarget> },
+    /// Reset `last_hit_at` to now, extending each file's eviction deadline.
+    RefreshLease { files: Vec<FileTarget> },
+}
+
+/// Identifies a single cached file by its DB key.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub struct FileTarget {
+    /// Path relative to the mount's cache directory (the DB `rel_path` column).
+    pub rel_path: PathBuf,
+    /// The mount's cache subdirectory path string (the DB `mount_id` column).
+    pub mount_id: String,
 }
 
 /// One variant per telemetry event constant in `telemetry.rs`,

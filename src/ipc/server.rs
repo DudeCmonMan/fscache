@@ -6,6 +6,7 @@ use tokio::net::UnixListener;
 use tokio::sync::{broadcast, watch};
 use tokio::time::{timeout, Duration};
 
+use crate::cache::db::CacheDb;
 use super::protocol::{ClientMessage, DaemonMessage};
 use super::{framed_split, recv_msg, send_msg};
 
@@ -22,6 +23,8 @@ pub async fn run_ipc_server(
     shutdown_tx: watch::Sender<bool>,
     mut shutdown_rx: watch::Receiver<bool>,
     recent: Arc<Mutex<VecDeque<DaemonMessage>>>,
+    db: Arc<CacheDb>,
+    cache_directory: PathBuf,
 ) -> anyhow::Result<()> {
     // Stale socket detection: if we can connect, another daemon is alive.
     // (Normally impossible since the instance lock prevents this, but be
@@ -59,9 +62,11 @@ pub async fn run_ipc_server(
                         let sd_tx        = shutdown_tx.clone();
                         let peer_path    = socket_path.clone();
                         let recent_clone = Arc::clone(&recent);
+                        let db_clone     = Arc::clone(&db);
+                        let cache_dir    = cache_directory.clone();
                         tokio::spawn(async move {
                             let peer = format!("client@{}", peer_path.display());
-                            if let Err(e) = handle_client(stream, hello_clone, &mut rx, sd_tx, recent_clone).await {
+                            if let Err(e) = handle_client(stream, hello_clone, &mut rx, sd_tx, recent_clone, db_clone, cache_dir).await {
                                 tracing::debug!("{peer} disconnected: {e}");
                             } else {
                                 tracing::debug!("{peer} disconnected cleanly");
@@ -99,6 +104,8 @@ async fn handle_client(
     rx: &mut broadcast::Receiver<DaemonMessage>,
     shutdown_tx: watch::Sender<bool>,
     recent: Arc<Mutex<VecDeque<DaemonMessage>>>,
+    db: Arc<CacheDb>,
+    _cache_directory: PathBuf,
 ) -> anyhow::Result<()> {
     let (mut reader, mut writer) = framed_split(stream);
 
@@ -141,6 +148,36 @@ async fn handle_client(
                         tracing::info!("IPC: received Shutdown command from TUI client");
                         let _ = shutdown_tx.send(true);
                         return Ok(());
+                    }
+                    Some(ClientMessage::EvictFiles { files }) => {
+                        for target in &files {
+                            // The mount_id stored in the DB is the absolute path of the
+                            // mount's cache subdirectory. The file lives at
+                            // cache_directory / <subdir-name> / rel_path.
+                            let abs_path = PathBuf::from(&target.mount_id).join(&target.rel_path);
+                            if let Err(e) = std::fs::remove_file(&abs_path) {
+                                tracing::warn!("IPC evict: failed to delete {}: {e}", abs_path.display());
+                            } else {
+                                tracing::info!(
+                                    event = crate::telemetry::EVENT_EVICTION,
+                                    path = %abs_path.display(),
+                                    reason = "manual",
+                                    "evict (manual): {}",
+                                    abs_path.display()
+                                );
+                                db.remove(&target.rel_path, &target.mount_id);
+                            }
+                        }
+                    }
+                    Some(ClientMessage::RefreshLease { files }) => {
+                        for target in &files {
+                            db.mark_hit(&target.rel_path, &target.mount_id);
+                            tracing::info!(
+                                "IPC refresh lease: {} (mount {})",
+                                target.rel_path.display(),
+                                target.mount_id,
+                            );
+                        }
                     }
                     None => return Ok(()), // client closed connection
                 }

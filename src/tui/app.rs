@@ -1,7 +1,8 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::Ordering::Relaxed;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
@@ -14,7 +15,7 @@ use tokio::time::interval;
 
 use crate::cache::db::CacheDb;
 use crate::ipc::client;
-use crate::ipc::protocol::ClientMessage;
+use crate::ipc::protocol::{ClientMessage, FileTarget};
 use crate::ipc::{send_msg, IpcFramedWriter};
 use super::state::{CachedFileInfo, CacheSort, DashboardState, MountInfo, Page};
 use super::ui;
@@ -27,10 +28,8 @@ const POLL_TICK_SECS: u64 = 3;
 /// `q`      — detach TUI, daemon keeps running.
 /// `Ctrl+Q` — send `Shutdown` to daemon, then exit.
 pub async fn run_client(socket_path: PathBuf) -> anyhow::Result<()> {
-    // 1. Connect and read Hello.
     let (hello, mut reader, writer) = client::connect(&socket_path).await?;
 
-    // 2. Build local DashboardState from Hello metadata.
     let state = Arc::new(DashboardState::new());
     {
         let mut mounts = state.mounts.lock().unwrap();
@@ -52,7 +51,6 @@ pub async fn run_client(socket_path: PathBuf) -> anyhow::Result<()> {
         state.expiry_secs.store(hello.expiry_secs, Relaxed);
     }
 
-    // 3. Open the daemon's SQLite database read-only (WAL = concurrent access).
     let db_path = PathBuf::from(&hello.db_path);
     let db = Arc::new(CacheDb::open_readonly(&db_path)?);
 
@@ -60,15 +58,13 @@ pub async fn run_client(socket_path: PathBuf) -> anyhow::Result<()> {
         .map(|m| m.cache_dir.clone())
         .collect();
 
-    // 4. Spawn the IPC stream reader task.
     let state_for_ipc = Arc::clone(&state);
     let (disc_tx, mut disc_rx) = watch::channel(false);
     tokio::spawn(async move {
         let _ = client::run_client_stream(&mut reader, state_for_ipc).await;
-        let _ = disc_tx.send(true); // signal disconnect
+        let _ = disc_tx.send(true);
     });
 
-    // 5. Enter TUI.
     enable_raw_mode()?;
     let mut stdout = std::io::stdout();
     stdout.execute(EnterAlternateScreen)?;
@@ -109,11 +105,22 @@ async fn event_loop(
     let mut log_scroll = 0usize;
     let mut cache_sel  = 0usize;
     let mut cache_sort = CacheSort::Newest;
+    let mut checked:    HashSet<PathBuf> = HashSet::new();
+    // None = closed; Some(idx) = menu open with that item highlighted (0=Evict, 1=Refresh)
+    let mut menu:       Option<usize> = None;
+    // Flash message shown after an action is dispatched; blocks Enter for 2 seconds.
+    let mut status_msg: Option<(String, Instant)> = None;
 
     loop {
         tokio::select! {
             _ = render_tick.tick() => {
-                terminal.draw(|f| ui::render(f, &state, page, log_scroll, cache_sel, cache_sort))?;
+                if let Some((_, t)) = &status_msg {
+                    if t.elapsed() >= Duration::from_secs(2) {
+                        status_msg = None;
+                    }
+                }
+                let status = status_msg.as_ref().map(|(s, _)| s.as_str());
+                terminal.draw(|f| ui::render(f, &state, page, log_scroll, cache_sel, cache_sort, &checked, menu, status))?;
             }
 
             _ = poll_tick.tick() => {
@@ -125,14 +132,44 @@ async fn event_loop(
                     if key.kind != KeyEventKind::Press {
                         continue;
                     }
+
+                    // --- Action menu (overlay) ---
+                    if let Some(sel) = menu {
+                        match key.code {
+                            KeyCode::Up   => { menu = Some(sel.saturating_sub(1)); }
+                            KeyCode::Down => { menu = Some((sel + 1).min(1)); }
+                            KeyCode::Esc  => { menu = None; }
+                            KeyCode::Enter => {
+                                let targets = build_targets(&state, &checked, cache_sel, cache_sort);
+                                if !targets.is_empty() {
+                                    let n = targets.len();
+                                    let (msg, flash) = if sel == 0 {
+                                        let f = format!("Evicting {} file{}…", n, if n == 1 { "" } else { "s" });
+                                        (ClientMessage::EvictFiles { files: targets }, f)
+                                    } else {
+                                        let f = format!("Refreshing lease for {} file{}…", n, if n == 1 { "" } else { "s" });
+                                        (ClientMessage::RefreshLease { files: targets }, f)
+                                    };
+                                    let _ = send_msg(&mut writer, &msg).await;
+                                    checked.clear();
+                                    status_msg = Some((flash, Instant::now()));
+                                }
+                                menu = None;
+                            }
+                            _ => {}
+                        }
+                        let status = status_msg.as_ref().map(|(s, _)| s.as_str());
+                        terminal.draw(|f| ui::render(f, &state, page, log_scroll, cache_sel, cache_sort, &checked, menu, status))?;
+                        continue;
+                    }
+
+                    // --- Normal key handling ---
                     match key.code {
-                        // q — detach TUI, daemon keeps running.
                         KeyCode::Char('q') | KeyCode::Char('Q')
                             if !key.modifiers.contains(KeyModifiers::CONTROL) =>
                         {
                             break;
                         }
-                        // Ctrl+Q — request daemon shutdown.
                         KeyCode::Char('q') | KeyCode::Char('Q')
                             if key.modifiers.contains(KeyModifiers::CONTROL) =>
                         {
@@ -142,29 +179,64 @@ async fn event_loop(
                         KeyCode::Right => {
                             page = page.next();
                             log_scroll = 0;
+                            checked.clear();
+                            menu = None;
                         }
                         KeyCode::Left => {
                             page = page.prev();
                             log_scroll = 0;
+                            checked.clear();
+                            menu = None;
                         }
-                        KeyCode::Char('1') => { page = Page::Status; log_scroll = 0; }
-                        KeyCode::Char('2') => { page = Page::Cache;  cache_sel = 0; }
-                        KeyCode::Char('3') => { page = Page::Logs;   log_scroll = 0; }
-                        KeyCode::Down => match page {
-                            Page::Cache => {
-                                let len = state.cached_files.lock().unwrap().len();
-                                if len > 0 { cache_sel = (cache_sel + 1).min(len - 1); }
-                            }
-                            Page::Logs => {
-                                let len = state.recent_logs.lock().unwrap().len();
-                                if len > 0 { log_scroll = (log_scroll + 1).min(len.saturating_sub(1)); }
-                            }
-                            _ => {}
+                        KeyCode::Char('1') => {
+                            page = Page::Status;
+                            log_scroll = 0;
+                            checked.clear();
+                            menu = None;
                         }
-                        KeyCode::Up => match page {
-                            Page::Cache => { cache_sel = cache_sel.saturating_sub(1); }
-                            Page::Logs  => { log_scroll = log_scroll.saturating_sub(1); }
-                            _ => {}
+                        KeyCode::Char('2') => {
+                            page = Page::Cache;
+                            cache_sel = 0;
+                            checked.clear();
+                            menu = None;
+                        }
+                        KeyCode::Char('3') => {
+                            page = Page::Logs;
+                            log_scroll = 0;
+                            checked.clear();
+                            menu = None;
+                        }
+                        KeyCode::Down => {
+                            let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+                            match page {
+                                Page::Cache => {
+                                    let len = state.cached_files.lock().unwrap().len();
+                                    if len > 0 {
+                                        cache_sel = (cache_sel + 1).min(len - 1);
+                                        if shift {
+                                            toggle_checked_at(&state, &mut checked, cache_sel, cache_sort);
+                                        }
+                                    }
+                                }
+                                Page::Logs => {
+                                    let len = state.recent_logs.lock().unwrap().len();
+                                    if len > 0 { log_scroll = (log_scroll + 1).min(len.saturating_sub(1)); }
+                                }
+                                _ => {}
+                            }
+                        }
+                        KeyCode::Up => {
+                            let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+                            match page {
+                                Page::Cache => {
+                                    cache_sel = cache_sel.saturating_sub(1);
+                                    if shift {
+                                        toggle_checked_at(&state, &mut checked, cache_sel, cache_sort);
+                                    }
+                                }
+                                Page::Logs => { log_scroll = log_scroll.saturating_sub(1); }
+                                _ => {}
+                            }
                         }
                         KeyCode::Home => match page {
                             Page::Cache => { cache_sel = 0; }
@@ -185,11 +257,26 @@ async fn event_loop(
                         KeyCode::Char('s') | KeyCode::Char('S') => {
                             if page == Page::Cache {
                                 cache_sort = cache_sort.next();
+                                checked.clear();
+                            }
+                        }
+                        KeyCode::Char(' ') => {
+                            if page == Page::Cache {
+                                toggle_checked_at(&state, &mut checked, cache_sel, cache_sort);
+                            }
+                        }
+                        KeyCode::Enter => {
+                            if page == Page::Cache && status_msg.is_none() {
+                                let has_files = !state.cached_files.lock().unwrap().is_empty();
+                                if has_files {
+                                    menu = Some(0);
+                                }
                             }
                         }
                         _ => {}
                     }
-                    terminal.draw(|f| ui::render(f, &state, page, log_scroll, cache_sel, cache_sort))?;
+                    let status = status_msg.as_ref().map(|(s, _)| s.as_str());
+                    terminal.draw(|f| ui::render(f, &state, page, log_scroll, cache_sel, cache_sort, &checked, menu, status))?;
                 }
             }
 
@@ -203,6 +290,61 @@ async fn event_loop(
     }
 
     Ok(())
+}
+
+/// Toggle the checked state for whichever file sits at `idx` in the sorted list.
+fn toggle_checked_at(
+    state: &DashboardState,
+    checked: &mut HashSet<PathBuf>,
+    idx: usize,
+    sort: CacheSort,
+) {
+    let files = state.cached_files.lock().unwrap();
+    let mut sorted: Vec<&CachedFileInfo> = files.iter().collect();
+    sort_refs(&mut sorted, sort);
+    if let Some(f) = sorted.get(idx) {
+        if !checked.remove(&f.path) {
+            checked.insert(f.path.clone());
+        }
+    }
+}
+
+/// Build the `Vec<FileTarget>` to send with an IPC command.
+/// Uses the checked set if non-empty, otherwise the highlighted file.
+fn build_targets(
+    state: &DashboardState,
+    checked: &HashSet<PathBuf>,
+    sel: usize,
+    sort: CacheSort,
+) -> Vec<FileTarget> {
+    let files = state.cached_files.lock().unwrap();
+    let mut sorted: Vec<&CachedFileInfo> = files.iter().collect();
+    sort_refs(&mut sorted, sort);
+
+    if checked.is_empty() {
+        sorted.get(sel).map(|f| vec![FileTarget {
+            rel_path: f.path.clone(),
+            mount_id: f.mount_id.clone(),
+        }]).unwrap_or_default()
+    } else {
+        sorted.iter()
+            .filter(|f| checked.contains(&f.path))
+            .map(|f| FileTarget {
+                rel_path: f.path.clone(),
+                mount_id: f.mount_id.clone(),
+            })
+            .collect()
+    }
+}
+
+fn sort_refs<'a>(files: &mut Vec<&'a CachedFileInfo>, sort: CacheSort) {
+    match sort {
+        CacheSort::Newest   => files.sort_by(|a, b| b.cached_at.cmp(&a.cached_at)),
+        CacheSort::Oldest   => files.sort_by(|a, b| a.cached_at.cmp(&b.cached_at)),
+        CacheSort::Largest  => files.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes)),
+        CacheSort::Smallest => files.sort_by(|a, b| a.size_bytes.cmp(&b.size_bytes)),
+        CacheSort::NameAz   => files.sort_by(|a, b| a.path.cmp(&b.path)),
+    }
 }
 
 fn poll_cache_stats(state: &Arc<DashboardState>, db: &Arc<CacheDb>, mount_dirs: &[PathBuf]) {
@@ -228,7 +370,14 @@ fn poll_cache_stats(state: &Arc<DashboardState>, db: &Arc<CacheDb>, mount_dirs: 
 
         for (path, size, cached_at, last_hit_at) in files {
             let evicts_at = last_hit_at + expiry;
-            combined.push(CachedFileInfo { path, size_bytes: size, cached_at, last_hit_at, evicts_at });
+            combined.push(CachedFileInfo {
+                path,
+                size_bytes: size,
+                cached_at,
+                last_hit_at,
+                evicts_at,
+                mount_id: mount_id.clone(),
+            });
         }
     }
 

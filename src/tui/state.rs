@@ -111,12 +111,11 @@ pub struct LogEntry {
 pub struct CachedFileInfo {
     pub path:        PathBuf,
     pub size_bytes:  u64,
-    /// When the file was first inserted into the cache (from DB `cached_at`).
     pub cached_at:   SystemTime,
-    /// When the file was last read from the cache (from DB `last_hit_at`).
     pub last_hit_at: SystemTime,
-    /// When this file will be evicted (last_hit_at + expiry duration).
     pub evicts_at:   SystemTime,
+    /// DB `mount_id` for this file (the mount's cache subdirectory path string).
+    pub mount_id:    String,
 }
 
 pub struct CopyProgress {

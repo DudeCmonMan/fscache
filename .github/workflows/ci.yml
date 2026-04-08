@@ -84,12 +84,12 @@ jobs:
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
           mkdir -p release
-          cp target/release/f-cache release/
+          cp target/release/fscache release/
           cp config.toml release/
-          cp f-cache.service release/
+          cp fscache.service release/
           cp LICENSE release/
           cp README.md release/
-          tar -czf "f-cache-${TAG}-linux-amd64.tar.gz" -C release .
+          tar -czf "fscache-${TAG}-linux-amd64.tar.gz" -C release .
 
       - name: Create GitHub Release
         env:
@@ -97,6 +97,6 @@ jobs:
         run: |
           TAG="${GITHUB_REF#refs/tags/}"
           gh release create "$TAG" \
-            "f-cache-${TAG}-linux-amd64.tar.gz" \
+            "fscache-${TAG}-linux-amd64.tar.gz" \
             --title "$TAG" \
             --generate-notes

@@ -30,7 +30,7 @@ cache_window_start = "08:00"             # Allowed caching window start (HH:MM, 
 cache_window_end = "02:00"               # Allowed caching window end (wraps past midnight)
 
 [logging]
-log_directory = "/var/log/f-cache"       # Directory for rolling daily log files
+log_directory = "/var/log/fscache"       # Directory for rolling daily log files
 console_level = "info"                   # Log level for terminal output (error/warn/info/debug/trace)
 file_level = "debug"                     # Log level for log files (captures full detail)
 repeat_log_window_secs = 300             # Suppress repeated access logs for the same file within this window (0 = disabled)

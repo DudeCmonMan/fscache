@@ -61,7 +61,7 @@ impl CacheManager {
         };
 
         // Open the shared DB in the global cache root so all mounts use the same file.
-        let db_path = global_cache_dir.join("fcache.db");
+        let db_path = global_cache_dir.join("fscache.db");
         let db = Arc::new(CacheDb::open(&db_path).unwrap_or_else(|e| {
             tracing::warn!("failed to open cache DB {}: {e} — falling back to no-op DB", db_path.display());
             CacheDb::open(std::path::Path::new(":memory:")).expect("in-memory DB must open")

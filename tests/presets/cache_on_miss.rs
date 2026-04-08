@@ -7,7 +7,7 @@
 ///   FUSE open() → AccessEvent → ActionEngine → CacheOnMiss::on_miss()
 ///   → CopyRequest → copier → mark_cached() → subsequent reads served from SSD.
 use crate::common::{write_backing_file, FuseHarness};
-use f_cache::presets::cache_on_miss::CacheOnMiss;
+use fscache::presets::cache_on_miss::CacheOnMiss;
 use std::sync::Arc;
 use std::time::Duration;
 

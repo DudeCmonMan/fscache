@@ -1,4 +1,4 @@
-# f-cache
+# fscache
 
 Transparent SSD caching for Plex media (and any other file workload). Sits between your application and a network share / drive array using a FUSE overmount — Plex sees no difference, but episode files are silently pre-copied to local SSD before they're needed. Designed to run ON the Plex server itself.
 
@@ -25,7 +25,7 @@ I created this for a few reasons:
 
 ## How it works
 
-f-cache mounts a read-only FUSE filesystem **directly over** the existing media directory. Plex keeps reading from the same path it always has. When a file is opened, FUSE intercepts the request and serves it from the SSD cache if available, falling back to the network share transparently if not.
+fscache mounts a read-only FUSE filesystem **directly over** the existing media directory. Plex keeps reading from the same path it always has. When a file is opened, FUSE intercepts the request and serves it from the SSD cache if available, falling back to the network share transparently if not.
 
 In the background, an action engine watches which files are being opened and pre-copies the next N episodes to the SSD so they're ready before Plex needs them.
 
@@ -58,7 +58,7 @@ Set via `[preset] name` in `config.toml`.
 - **Launch at any time.** The FUSE mount can go up or come down without restarting Plex. Streams already in flight are not interrupted on shutdown.
 - **Graceful by default.** Cache corruption, copy failures, and missing files are all handled without crashing — the worst case is a cache miss that falls back to the network share.
 - **Drop-in / drop-out.** No modifications to Plex or your media library. Remove the service and your media directory is exactly as it was.
-- **Multiple mounts.** Point f-cache at multiple media directories simultaneously — each gets its own namespaced cache subdirectory.
+- **Multiple mounts.** Point fscache at multiple media directories simultaneously — each gets its own namespaced cache subdirectory.
 
 ---
 
@@ -69,7 +69,7 @@ Set via `[preset] name` in `config.toml`.
 Grab the latest release from the [Releases page](https://github.com/DudeCmonMan/plex-hot-cache/releases) and extract it wherever you want to run it from:
 
 ```bash
-tar -xzf f-cache-*.tar.gz -C /opt/f-cache
+tar -xzf fscache-*.tar.gz -C /opt/fscache
 ```
 
 The release includes the binary, a default `config.toml`, and the LICENSE.
@@ -97,8 +97,8 @@ echo "user_allow_other" | sudo tee -a /etc/fuse.conf
 ### 4. Run
 
 ```bash
-cd /opt/f-cache
-sudo ./f-cache
+cd /opt/fscache
+sudo ./fscache
 ```
 
 That's it. The cache is active and Plex doesn't need any changes. Stop it with `Ctrl+C` — the mount detaches cleanly.
@@ -112,19 +112,19 @@ Add `--tui` to run with a live dashboard showing cache stats, active copies, and
 For a persistent setup that starts on boot:
 
 ```bash
-sudo cp f-cache.service /etc/systemd/system/
+sudo cp fscache.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable --now f-cache
+sudo systemctl enable --now fscache
 ```
 
 Verify it's running:
 
 ```bash
-systemctl status f-cache
-mount | grep f-cache
+systemctl status fscache
+mount | grep fscache
 ```
 
-The service file is included in the release. If your media is on a network share, edit the unit to wait for the mount — see the comments inside `f-cache.service`.
+The service file is included in the release. If your media is on a network share, edit the unit to wait for the mount — see the comments inside `fscache.service`.
 
 ---
 
@@ -132,7 +132,7 @@ The service file is included in the release. If your media is on a network share
 
 ```bash
 cargo build --release
-sudo cp target/release/f-cache /usr/local/bin/
+sudo cp target/release/fscache /usr/local/bin/
 ```
 
 ---
@@ -178,7 +178,7 @@ Accesses outside the window are buffered and flushed when the window re-opens.
 
 | Setting | Default | Description |
 |---|---|---|
-| `logging.log_directory` | `/var/log/f-cache` | Directory for rolling daily log files |
+| `logging.log_directory` | `/var/log/fscache` | Directory for rolling daily log files |
 | `logging.console_level` | `info` | Terminal log level (`error`/`warn`/`info`/`debug`/`trace`) |
 | `logging.file_level` | `debug` | Log file level |
 | `logging.repeat_log_window_secs` | `300` | Suppress repeated access logs for the same file within this window |
@@ -209,7 +209,7 @@ cache_window_start = "08:00"
 cache_window_end   = "02:00"
 
 [logging]
-log_directory          = "/var/log/f-cache"
+log_directory          = "/var/log/fscache"
 console_level          = "info"
 file_level             = "debug"
 repeat_log_window_secs = 300

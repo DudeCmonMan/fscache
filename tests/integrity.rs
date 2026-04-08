@@ -82,9 +82,9 @@ fn unmount_restores_backing_access() {
     // Mount and drop
     {
         use fuser::{MountOption, SessionACL};
-        use f_cache::fuse_fs::FCache;
+        use fscache::fuse_fs::FsCache;
 
-        let fs = FCache::new(backing_dir.path()).unwrap();
+        let fs = FsCache::new(backing_dir.path()).unwrap();
         let mut config = fuser::Config::default();
         config.mount_options = vec![MountOption::RO, MountOption::FSName("test".to_string())];
         config.acl = SessionACL::Owner;

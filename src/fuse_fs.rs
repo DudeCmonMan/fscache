@@ -23,7 +23,7 @@ use crate::action_engine::AccessEvent;
 /// Short TTL so the kernel re-checks after a cache file appears.
 const TTL: Duration = Duration::from_secs(1);
 
-pub struct FCache {
+pub struct FsCache {
     /// O_PATH fd opened to target_directory *before* the FUSE overmount.
     pub backing_store: Arc<BackingStore>,
     inodes: Arc<Mutex<InodeTable>>,
@@ -40,7 +40,7 @@ pub struct FCache {
     open_paths: Mutex<HashMap<u64, PathBuf>>,
 }
 
-impl FCache {
+impl FsCache {
     /// MUST be called before mounting FUSE over `backing_path`.
     pub fn new(backing_path: &Path) -> anyhow::Result<Self> {
         let c_path = CString::new(backing_path.as_os_str().as_bytes())
@@ -191,7 +191,7 @@ impl FCache {
     }
 }
 
-impl Filesystem for FCache {
+impl Filesystem for FsCache {
     fn init(&mut self, _req: &Request, _config: &mut KernelConfig) -> std::io::Result<()> {
         tracing::info!("FUSE filesystem initialized");
         Ok(())

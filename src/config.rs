@@ -140,7 +140,7 @@ impl Default for LoggingConfig {
     }
 }
 
-fn default_log_directory() -> String { "/var/log/f-cache".to_string() }
+fn default_log_directory() -> String { "/var/log/fscache".to_string() }
 fn default_console_level() -> String { "info".to_string() }
 fn default_file_level() -> String { "debug".to_string() }
 fn default_repeat_log_window_secs() -> u64 { 60 }

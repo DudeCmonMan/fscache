@@ -2,12 +2,12 @@ use std::path::Path;
 use std::sync::Arc;
 
 use fuser::{MountOption, SessionACL};
-use f_cache::action_engine::{run_copier_task, AccessEvent, ActionEngine, CopyRequest};
-use f_cache::cache::CacheManager;
-use f_cache::fuse_fs::FCache;
-use f_cache::preset::CachePreset;
-use f_cache::presets::plex_episode_prediction::PlexEpisodePrediction;
-use f_cache::scheduler::Scheduler;
+use fscache::action_engine::{run_copier_task, AccessEvent, ActionEngine, CopyRequest};
+use fscache::cache::CacheManager;
+use fscache::fuse_fs::FsCache;
+use fscache::preset::CachePreset;
+use fscache::presets::plex_episode_prediction::PlexEpisodePrediction;
+use fscache::scheduler::Scheduler;
 use tempfile::TempDir;
 use tokio::sync::mpsc;
 
@@ -15,7 +15,7 @@ fn test_fuse_config() -> fuser::Config {
     let mut config = fuser::Config::default();
     config.mount_options = vec![
         MountOption::RO,
-        MountOption::FSName("f-cache-test".to_string()),
+        MountOption::FSName("fscache-test".to_string()),
     ];
     config.acl = SessionACL::Owner;
     config
@@ -42,7 +42,7 @@ impl FuseHarness {
         let backing = TempDir::new()?;
         let mount = TempDir::new()?;
 
-        let fs = FCache::new(backing.path())?;
+        let fs = FsCache::new(backing.path())?;
         let session = fuser::spawn_mount2(fs, mount.path(), &test_fuse_config())?;
 
         Ok(Self {
@@ -60,7 +60,7 @@ impl FuseHarness {
         let mount = TempDir::new()?;
         let cache_dir = TempDir::new()?;
 
-        let mut fs = FCache::new(backing.path())?;
+        let mut fs = FsCache::new(backing.path())?;
         let cache_mgr = Arc::new(CacheManager::new(
             cache_dir.path().to_path_buf(),
             cache_dir.path().to_path_buf(),
@@ -121,7 +121,7 @@ impl FuseHarness {
         let mount = TempDir::new()?;
         let cache_dir = TempDir::new()?;
 
-        let mut fs = FCache::new(backing.path())?;
+        let mut fs = FsCache::new(backing.path())?;
         let backing_store = Arc::clone(&fs.backing_store);
         fs.preset = Some(Arc::clone(&preset));
 
@@ -167,7 +167,7 @@ impl FuseHarness {
 }
 
 /// Overmount harness: FUSE is mounted ON TOP of the same directory the files
-/// live in, exactly as in production.  The O_PATH fd retained in `FCache`
+/// live in, exactly as in production.  The O_PATH fd retained in `FsCache`
 /// provides access to the real files underneath after the overmount.
 ///
 /// ## Drop ordering
@@ -204,7 +204,7 @@ impl OvermountHarness {
         // goes through FUSE (RO) and std::fs::write would return EACCES.
         populate(dir.path());
 
-        let mut fs = FCache::new(dir.path())?;
+        let mut fs = FsCache::new(dir.path())?;
         let backing_store = Arc::clone(&fs.backing_store);
 
         let preset = Arc::new(PlexEpisodePrediction::new(lookahead, vec![], false));
@@ -245,7 +245,7 @@ impl OvermountHarness {
         let mut config = fuser::Config::default();
         config.mount_options = vec![
             MountOption::RO,
-            MountOption::FSName("f-cache-overmount-test".to_string()),
+            MountOption::FSName("fscache-overmount-test".to_string()),
         ];
         config.acl = SessionACL::Owner;
 
@@ -292,7 +292,7 @@ impl MultiFuseHarness {
             let cache_subdir = shared_cache_base.path().join(i.to_string());
             std::fs::create_dir_all(&cache_subdir)?;
 
-            let mut fs = FCache::new(backing.path())?;
+            let mut fs = FsCache::new(backing.path())?;
             let cache_mgr = Arc::new(CacheManager::new(
                 cache_subdir,
                 shared_cache_base.path().to_path_buf(),
@@ -320,7 +320,7 @@ impl MultiFuseHarness {
             let cache_subdir = shared_cache_base.path().join(i.to_string());
             std::fs::create_dir_all(&cache_subdir)?;
 
-            let mut fs = FCache::new(backing.path())?;
+            let mut fs = FsCache::new(backing.path())?;
             let backing_store = Arc::clone(&fs.backing_store);
 
             let preset = Arc::new(PlexEpisodePrediction::new(lookahead, vec![], false));

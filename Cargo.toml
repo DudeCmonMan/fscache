@@ -1,15 +1,15 @@
 [package]
-name = "f_cache"
+name = "fscache"
 version = "0.1.2"
 edition = "2024"
 license = "GPL-3.0-or-later"
 
 [lib]
-name = "f_cache"
+name = "fscache"
 path = "src/lib.rs"
 
 [[bin]]
-name = "f-cache"
+name = "fscache"
 path = "src/main.rs"
 
 [dependencies]

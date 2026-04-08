@@ -9,16 +9,16 @@ use std::time::Duration;
 use tempfile::TempDir;
 use tokio::sync::mpsc;
 
-use f_cache::action_engine::{
+use fscache::action_engine::{
     buffer_event, run_copier_task, show_root, AccessEvent, ActionEngine, CopyRequest,
 };
-use f_cache::backing_store::BackingStore;
-use f_cache::cache::CacheManager;
-use f_cache::db::CacheDb;
-use f_cache::preset::CachePreset;
-use f_cache::prediction_utils::{parse_season_dir, parse_season_episode};
-use f_cache::presets::plex_episode_prediction::PlexEpisodePrediction;
-use f_cache::scheduler::Scheduler;
+use fscache::backing_store::BackingStore;
+use fscache::cache::CacheManager;
+use fscache::db::CacheDb;
+use fscache::preset::CachePreset;
+use fscache::prediction_utils::{parse_season_dir, parse_season_episode};
+use fscache::presets::plex_episode_prediction::PlexEpisodePrediction;
+use fscache::scheduler::Scheduler;
 
 // ---- Scheduler tests ----
 
@@ -304,7 +304,7 @@ fn copier_copies_file_correctly() {
     let backing_store = make_backing_store(backing.path());
 
     let dest = cache_dir.path().join("test.mkv");
-    f_cache::copier::copy_to_cache(
+    fscache::copier::copy_to_cache(
         &backing_store,
         std::path::Path::new("test.mkv"),
         &dest,

@@ -24,7 +24,7 @@ const BUILD_VERSION: &str = env!("BUILD_VERSION");
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "f-cache",
+    name = "fscache",
     version = BUILD_VERSION,
     about = "Generic FUSE caching framework — transparent SSD overmount"
 )]
@@ -53,7 +53,7 @@ async fn main() -> anyhow::Result<()> {
     let file_filter = tracing_subscriber::EnvFilter::new(&config.logging.file_level);
 
     std::fs::create_dir_all(&config.logging.log_directory).ok();
-    let file_appender = tracing_appender::rolling::daily(&config.logging.log_directory, "f-cache.log");
+    let file_appender = tracing_appender::rolling::daily(&config.logging.log_directory, "fscache.log");
     let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
 
     let dashboard = if args.tui {
@@ -92,7 +92,7 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
-    tracing::info!("f-cache {} starting", BUILD_VERSION);
+    tracing::info!("fscache {} starting", BUILD_VERSION);
     tracing::info!("Config: {}", config_path.display());
     tracing::info!("Cache:  {}", config.paths.cache_directory);
     tracing::info!(
@@ -131,7 +131,7 @@ async fn main() -> anyhow::Result<()> {
     fuse_config.mount_options = vec![
         MountOption::RO,
         MountOption::AutoUnmount,
-        MountOption::FSName("f-cache".to_string()),
+        MountOption::FSName("fscache".to_string()),
     ];
     fuse_config.acl = SessionACL::All;
 
@@ -151,7 +151,7 @@ async fn main() -> anyhow::Result<()> {
         tracing::info!("[{}] Cache:  {}", mount_name, mount_cache_dir.display());
 
         // Must open O_PATH fd BEFORE mounting FUSE over the target directory.
-        let mut fs = fuse_fs::FCache::new(target)?;
+        let mut fs = fuse_fs::FsCache::new(target)?;
         fs.passthrough_mode = config.cache.passthrough_mode;
         fs.repeat_log_window = std::time::Duration::from_secs(config.logging.repeat_log_window_secs);
 

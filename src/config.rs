@@ -8,7 +8,11 @@ pub struct Config {
     #[serde(default)]
     pub cache: CacheConfig,
     #[serde(default)]
+    pub eviction: EvictionConfig,
+    #[serde(default)]
     pub preset: PresetConfig,
+    #[serde(default)]
+    pub prefetch: PrefetchConfig,
     #[serde(default)]
     pub plex: PlexConfig,
     #[serde(default)]
@@ -28,12 +32,13 @@ pub struct PathsConfig {
 
 #[derive(Debug, Deserialize)]
 pub struct CacheConfig {
-    #[serde(default = "default_max_size_gb")]
-    pub max_size_gb: f64,
-    #[serde(default = "default_expiry_hours", deserialize_with = "de_u64")]
-    pub expiry_hours: u64,
-    #[serde(default = "default_min_free_space_gb")]
-    pub min_free_space_gb: f64,
+    /// Deprecated: use [eviction].max_size_gb instead.
+    pub max_size_gb: Option<f64>,
+    /// Deprecated: use [eviction].expiry_hours instead.
+    #[serde(default, deserialize_with = "de_opt_u64")]
+    pub expiry_hours: Option<u64>,
+    /// Deprecated: use [eviction].min_free_space_gb instead.
+    pub min_free_space_gb: Option<f64>,
     #[serde(default)]
     pub passthrough_mode: bool,
     /// Per-mount prediction cache budget (0.0 = unlimited).
@@ -53,9 +58,9 @@ pub struct CacheConfig {
 impl Default for CacheConfig {
     fn default() -> Self {
         Self {
-            max_size_gb: default_max_size_gb(),
-            expiry_hours: default_expiry_hours(),
-            min_free_space_gb: default_min_free_space_gb(),
+            max_size_gb: None,
+            expiry_hours: None,
+            min_free_space_gb: None,
             passthrough_mode: false,
             max_cache_pull_per_mount_gb: 0.0,
             deferred_ttl_minutes: default_deferred_ttl_minutes(),
@@ -66,8 +71,107 @@ impl Default for CacheConfig {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct EvictionConfig {
+    /// Eviction strategy — only "lru" supported for now (future-proofing).
+    #[serde(default = "default_eviction_strategy")]
+    pub strategy: String,
+    #[serde(default = "default_max_size_gb")]
+    pub max_size_gb: f64,
+    #[serde(default = "default_expiry_hours", deserialize_with = "de_u64")]
+    pub expiry_hours: u64,
+    #[serde(default = "default_min_free_space_gb")]
+    pub min_free_space_gb: f64,
+}
+
+impl Default for EvictionConfig {
+    fn default() -> Self {
+        Self {
+            strategy: default_eviction_strategy(),
+            max_size_gb: default_max_size_gb(),
+            expiry_hours: default_expiry_hours(),
+            min_free_space_gb: default_min_free_space_gb(),
+        }
+    }
+}
+
+impl EvictionConfig {
+    /// Resolve eviction settings, falling back to deprecated [cache] fields if present.
+    /// Logs a deprecation warning if any [cache] eviction fields are used.
+    pub fn resolve(eviction: &EvictionConfig, cache: &CacheConfig) -> ResolvedEviction {
+        let mut used_legacy = false;
+
+        let max_size_gb = if let Some(v) = cache.max_size_gb {
+            used_legacy = true;
+            v
+        } else {
+            eviction.max_size_gb
+        };
+        let expiry_hours = if let Some(v) = cache.expiry_hours {
+            used_legacy = true;
+            v
+        } else {
+            eviction.expiry_hours
+        };
+        let min_free_space_gb = if let Some(v) = cache.min_free_space_gb {
+            used_legacy = true;
+            v
+        } else {
+            eviction.min_free_space_gb
+        };
+
+        if used_legacy {
+            tracing::warn!(
+                "Eviction settings in [cache] are deprecated. \
+                 Move max_size_gb, expiry_hours, min_free_space_gb to [eviction]."
+            );
+        }
+
+        ResolvedEviction { max_size_gb, expiry_hours, min_free_space_gb }
+    }
+}
+
+pub struct ResolvedEviction {
+    pub max_size_gb: f64,
+    pub expiry_hours: u64,
+    pub min_free_space_gb: f64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PrefetchConfig {
+    /// "cache-hit-only" | "cache-neighbors" | "cache-parent-recursively"
+    #[serde(default = "default_prefetch_mode")]
+    pub mode: String,
+    /// Max directory depth for cache-parent-recursively mode.
+    #[serde(default = "default_max_depth")]
+    pub max_depth: usize,
+    /// Process binary names (and their children) that must never trigger caching.
+    #[serde(default)]
+    pub process_blocklist: Vec<String>,
+    /// Regex patterns (matched against filename) — only matching files are cached.
+    /// Ignored if file_blacklist is non-empty and the file matches the blacklist.
+    #[serde(default)]
+    pub file_whitelist: Vec<String>,
+    /// Regex patterns (matched against filename) — matching files are never cached.
+    /// Blacklist is checked before whitelist.
+    #[serde(default)]
+    pub file_blacklist: Vec<String>,
+}
+
+impl Default for PrefetchConfig {
+    fn default() -> Self {
+        Self {
+            mode: default_prefetch_mode(),
+            max_depth: default_max_depth(),
+            process_blocklist: Vec::new(),
+            file_whitelist: Vec::new(),
+            file_blacklist: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
 pub struct PresetConfig {
-    /// Which preset to use: "plex-episode-prediction" (default) or "cache-on-miss".
+    /// Which preset to use: "plex-episode-prediction", "prefetch", or "cache-on-miss" (deprecated alias for prefetch cache-hit-only).
     #[serde(default = "default_preset_name")]
     pub name: String,
 }
@@ -156,6 +260,9 @@ fn default_expiry_hours() -> u64 { 72 }
 fn default_min_free_space_gb() -> f64 { 10.0 }
 fn default_window_start() -> String { "08:00".to_string() }
 fn default_window_end() -> String { "02:00".to_string() }
+fn default_eviction_strategy() -> String { "lru".to_string() }
+fn default_prefetch_mode() -> String { "cache-hit-only".to_string() }
+fn default_max_depth() -> usize { 3 }
 
 /// Accept both `10` and `10.0` in u64 fields — TOML floats are silently truncated.
 fn de_u64<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
@@ -167,6 +274,18 @@ fn de_u64<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
         NumericU64::Int(n) => Ok(n),
         NumericU64::Float(f) => Ok(f as u64),
     }
+}
+
+fn de_opt_u64<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
+    use serde::Deserialize;
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum NumericU64 { Int(u64), Float(f64) }
+    Ok(match Option::<NumericU64>::deserialize(d)? {
+        None => None,
+        Some(NumericU64::Int(n)) => Some(n),
+        Some(NumericU64::Float(f)) => Some(f as u64),
+    })
 }
 
 fn validate_instance_name(name: &str) -> anyhow::Result<()> {

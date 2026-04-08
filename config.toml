@@ -4,7 +4,22 @@ cache_directory = "/mnt/ssd-cache"      # SSD cache storage (NOT the FUSE mount)
 instance_name = "plex-movies"           # Unique name for this instance — used for DB filename and process lock (alphanumeric, hyphens, underscores)
 
 [preset]
-name = "plex-episode-prediction"         # Preset to use: "plex-episode-prediction" or "cache-on-miss"
+name = "plex-episode-prediction"         # Preset to use: "plex-episode-prediction", "prefetch", or "cache-on-miss" (deprecated alias)
+
+# ---------------------------------------------------------------------------
+# [prefetch] — only used when preset.name = "prefetch"
+# ---------------------------------------------------------------------------
+# [prefetch]
+# mode = "cache-hit-only"               # "cache-hit-only" — cache only the accessed file (default, safest)
+#                                        # "cache-neighbors" — cache all sibling files in the same directory
+#                                        # "cache-parent-recursively" — recursively cache parent directory up to max_depth levels
+# max_depth = 3                          # Max recursion depth for cache-parent-recursively (default 3)
+# process_blocklist = []                 # Process binary names (and their children) that must never trigger caching
+# file_whitelist = ["\\.mkv$", "\\.mp4$"] # Regex patterns matched against filename — only matching files are cached
+#                                        # Empty list = allow all files (when blacklist is also empty)
+# file_blacklist = ["\\.nfo$", "\\.jpg$"] # Regex patterns matched against filename — matching files are never cached
+#                                        # Blacklist is checked before whitelist; blacklist wins if both match
+#                                        # All patterns must be valid regex or the daemon refuses to start
 
 [plex]
 lookahead = 4                            # Episodes to cache ahead of the current one
@@ -16,10 +31,15 @@ process_blocklist = ["Plex Media Scanner", "Plex EAE Service", "Plex Media Finge
                                          # "Plex Media Fingerprinter" — separate audio fingerprinting binary
                                          # "Plex Transcoder" — NOT blocked: needed for transcoded playback
 
-[cache]
+[eviction]
 max_size_gb = 200.0                      # Total cache budget across ALL backing mounts combined
 expiry_hours = 72                        # Delete cached files not accessed within this window
 min_free_space_gb = 10.0                 # Stop caching if SSD free space drops below this
+# strategy = "lru"                       # Eviction strategy — only "lru" supported (reserved for future use)
+
+[cache]
+# max_size_gb, expiry_hours, min_free_space_gb have moved to [eviction] above.
+# They still work here for backward compatibility but will log a deprecation warning.
 passthrough_mode = false                 # If true, bypass cache entirely (debug/test mode)
 max_cache_pull_per_mount_gb = 0.0        # Per-mount lookahead prediction budget (0 = unlimited)
 deferred_ttl_minutes = 1440             # Discard saved deferred events older than this on startup (default 24h)

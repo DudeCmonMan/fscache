@@ -53,7 +53,6 @@ impl BackingStore {
         }
     }
 
-    /// Return the size in bytes of a file in the backing store, or None on error.
     pub fn file_size(&self, rel: &Path) -> Option<u64> {
         let fd = self.open_file(rel).ok()?;
         let size = unsafe {
@@ -62,6 +61,12 @@ impl BackingStore {
         };
         unsafe { libc::close(fd) };
         size
+    }
+
+    pub fn is_dir(&self, rel: &Path) -> bool {
+        self.stat(rel)
+            .map(|s| (s.st_mode & libc::S_IFMT) == libc::S_IFDIR)
+            .unwrap_or(false)
     }
 
     /// List entry names in a directory relative to the backing root (excludes `.` and `..`).

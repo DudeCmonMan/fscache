@@ -151,6 +151,8 @@ async fn run_daemon(config_path: Option<PathBuf>) -> anyhow::Result<()> {
             .expect("in-memory DB must open")
     }));
 
+    let eviction = config::EvictionConfig::resolve(&config.eviction, &config.cache);
+
     let max_cache_pull_bytes =
         (config.cache.max_cache_pull_per_mount_gb * 1_073_741_824.0) as u64;
 
@@ -178,8 +180,8 @@ async fn run_daemon(config_path: Option<PathBuf>) -> anyhow::Result<()> {
         window_end:     config.schedule.cache_window_end.clone(),
         preset_name:    config.preset.name.clone(),
         budget_max_bytes: max_cache_pull_bytes,
-        min_free_bytes: (config.cache.min_free_space_gb * 1_073_741_824.0) as u64,
-        expiry_secs:    config.cache.expiry_hours * 3600,
+        min_free_bytes: (eviction.min_free_space_gb * 1_073_741_824.0) as u64,
+        expiry_secs:    eviction.expiry_hours * 3600,
         db_path:        db_path.to_string_lossy().into_owned(),
         cache_directory: config.paths.cache_directory.clone(),
     });
@@ -247,18 +249,46 @@ async fn run_daemon(config_path: Option<PathBuf>) -> anyhow::Result<()> {
             config.logging.repeat_log_window_secs,
         );
 
-        let blocklist     = config.plex.process_blocklist.clone();
-        let rolling_buffer = config.plex.mode == "rolling-buffer";
+        let plex_blocklist  = config.plex.process_blocklist.clone();
+        let rolling_buffer  = config.plex.mode == "rolling-buffer";
 
         let preset: Arc<dyn preset::CachePreset> = match config.preset.name.as_str() {
             "plex-episode-prediction" | "episode-prediction" => Arc::new(
                 presets::plex_episode_prediction::PlexEpisodePrediction::new(
-                    config.plex.lookahead, blocklist, rolling_buffer,
+                    config.plex.lookahead, plex_blocklist, rolling_buffer,
                 ),
             ),
-            "cache-on-miss" => Arc::new(
-                presets::cache_on_miss::CacheOnMiss::new(blocklist),
-            ),
+            "prefetch" => {
+                let mode = presets::prefetch::parse_mode(&config.prefetch.mode)
+                    .map_err(|e| anyhow::anyhow!("[{}] {}", mount_name, e))?;
+                Arc::new(
+                    presets::prefetch::Prefetch::new(
+                        mode,
+                        config.prefetch.max_depth,
+                        config.prefetch.process_blocklist.clone(),
+                        &config.prefetch.file_whitelist,
+                        &config.prefetch.file_blacklist,
+                    )
+                    .map_err(|e| anyhow::anyhow!("[{}] prefetch preset config error: {}", mount_name, e))?,
+                )
+            }
+            "cache-on-miss" => {
+                tracing::warn!(
+                    "[{}] preset \"cache-on-miss\" is deprecated — \
+                     use preset.name = \"prefetch\" with mode = \"cache-hit-only\"",
+                    mount_name
+                );
+                Arc::new(
+                    presets::prefetch::Prefetch::new(
+                        presets::prefetch::PrefetchMode::CacheHitOnly,
+                        3,
+                        config.prefetch.process_blocklist.clone(),
+                        &[],
+                        &[],
+                    )
+                    .expect("cache-hit-only with no patterns always succeeds"),
+                )
+            }
             other => {
                 tracing::warn!(
                     "[{}] Unknown preset {:?}, falling back to \"plex-episode-prediction\"",
@@ -266,7 +296,7 @@ async fn run_daemon(config_path: Option<PathBuf>) -> anyhow::Result<()> {
                 );
                 Arc::new(
                     presets::plex_episode_prediction::PlexEpisodePrediction::new(
-                        config.plex.lookahead, blocklist, rolling_buffer,
+                        config.plex.lookahead, plex_blocklist, rolling_buffer,
                     ),
                 )
             }
@@ -277,9 +307,9 @@ async fn run_daemon(config_path: Option<PathBuf>) -> anyhow::Result<()> {
             mount_cache_dir.clone(),
             Arc::clone(&db),
             base_cache_dir.clone(),
-            config.cache.max_size_gb,
-            config.cache.expiry_hours,
-            config.cache.min_free_space_gb,
+            eviction.max_size_gb,
+            eviction.expiry_hours,
+            eviction.min_free_space_gb,
         ));
         cache_manager.startup_cleanup();
         fs.cache = Some(Arc::clone(&cache_manager));

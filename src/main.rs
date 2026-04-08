@@ -116,19 +116,10 @@ async fn main() -> anyhow::Result<()> {
     std::fs::create_dir_all(&base_cache_dir)?;
 
     let instance_name = &config.paths.instance_name;
-    let instance_db_dir = base_cache_dir.join("db").join(instance_name);
-    std::fs::create_dir_all(&instance_db_dir)?;
-    let db_path = instance_db_dir.join(format!("{instance_name}.db"));
+    let db_dir = PathBuf::from("/var/lib/fscache/db");
+    std::fs::create_dir_all(&db_dir)?;
+    let db_path = db_dir.join(format!("{instance_name}.db"));
     tracing::info!("Database: {}", db_path.display());
-
-    let legacy_db = base_cache_dir.join("fscache.db");
-    if legacy_db.exists() {
-        tracing::warn!(
-            "Found legacy database at {} — move it to {} to preserve cache history",
-            legacy_db.display(),
-            db_path.display()
-        );
-    }
 
     let db = Arc::new(cache::db::CacheDb::open(&db_path).unwrap_or_else(|e| {
         tracing::warn!("failed to open cache DB {}: {e} — falling back to in-memory DB", db_path.display());

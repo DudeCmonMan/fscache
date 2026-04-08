@@ -21,7 +21,7 @@ pub struct Config {
 pub struct PathsConfig {
     pub target_directories: Vec<String>,
     pub cache_directory: String,
-    /// Unique name for this instance — used as the DB subfolder name and process lock name.
+    /// Unique name for this instance — used as the DB filename and process lock name.
     /// Must be non-empty and contain only alphanumeric characters, hyphens, or underscores.
     pub instance_name: String,
 }

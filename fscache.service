@@ -17,6 +17,9 @@ RestartSec=10
 # FUSE with allow_other requires root or user_allow_other in /etc/fuse.conf.
 User=root
 
+# Create /var/lib/fscache/ with correct ownership for the database.
+StateDirectory=fscache
+
 # Give the binary time to unmount FUSE cleanly before SIGKILL.
 TimeoutStopSec=30
 

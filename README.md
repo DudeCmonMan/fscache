@@ -1,15 +1,19 @@
 # fscache
 
-Transparent SSD caching for Plex media (and any other file workload). Sits between your application and a network share / drive array using a FUSE overmount — Plex sees no difference, but episode files are silently pre-copied to local SSD before they're needed. Designed to run ON the Plex server itself.
+Transparent SSD caching for any read-heavy file workload — media servers, NAS-backed applications, anything that reads from slow storage. Sits between your application and a network share / drive array using a FUSE overmount — your application sees no difference, but files are silently pre-copied to local SSD before they're needed.
 
-No Plex plugins, no API wrappers, no config changes on the Plex side. Drop it in, point it at your media directory, and remove it just as easily. As long as it receives a proper signal, you can stop it while your server is running. Current streams will need to be restarted, but your server won't.
+No plugins, no API wrappers, no config changes on the application side. Drop it in, point it at your media directory, and remove it just as easily. As long as it receives a proper signal, you can stop it while your server is running. Active streams will need to be restarted, but your server won't.
 
 I created this for a few reasons:
 1. Better handle array spin-up/downs to save power (it really adds up in SoCal)
 2. Improve the viewing experience for myself
 3. No other tool did what I wanted — straightforward, simple setup and teardown
 
-## Now enhanced with Ratatui via --tui
+This started life as **plex-hot-cache** — a Plex-specific caching layer. As the design matured, I realized that the FUSE and caching logic was the main "magic" here, so it became **fscache** and open to all services. The Plex-specific smarts (episode prediction, transcoder filtering) are still here as a preset, but the tool works just as well for any read-heavy generic file workload.
+
+I plan on supporting this software to flesh out even more features (write caching, more eviction algos, more caching algos, other software integrations, etc.)
+
+## This software includes a monitor as well
 <table>
 <tr>
 <td><img width="758" height="822" alt="image" src="https://github.com/user-attachments/assets/993d9b19-d354-45a9-9961-7abf9d86cc44" /></td>
@@ -25,14 +29,18 @@ I created this for a few reasons:
 
 ## How it works
 
-fscache mounts a read-only FUSE filesystem **directly over** the existing media directory. Plex keeps reading from the same path it always has. When a file is opened, FUSE intercepts the request and serves it from the SSD cache if available, falling back to the network share transparently if not.
+fscache mounts a read-only FUSE filesystem **directly over** the existing filesystem directory. Your application keeps reading from the same path it always has. When a file is opened, FUSE intercepts the request and serves it from the SSD cache if available, falling back to the original backing store transparently if not.
 
-In the background, an action engine watches which files are being opened and pre-copies the next N episodes to the SSD so they're ready before Plex needs them.
+In the background, a preset-driven action engine watches which files are being opened and decides what else to cache — the next N episodes, neighboring files, or an entire directory tree, depending on how you configure it.
 
 ```
-Plex → /mnt/media (FUSE overmount)
-              ├─ cache hit  → /mnt/ssd-cache/...   (fast, local SSD)
-              └─ cache miss → backing SMB/NFS mount (slow, network)
+Application (Plex, Jellyfin, etc.)
+       │
+       ▼
+  /mnt/media ← FUSE overmount (fscache)
+       │
+       ├─ cache hit  → /mnt/ssd-cache/...    (fast, local SSD)
+       └─ cache miss → /mnt/nas/media/...    (slow, network share / drive array)
 ```
 
 On shutdown, the FUSE mount is lazily detached — any streams already in progress continue uninterrupted from their open file descriptors.
@@ -43,13 +51,42 @@ On shutdown, the FUSE mount is lazily detached — any streams already in progre
 
 Behavior is controlled by a **preset** — a pluggable strategy for deciding what to cache and when.
 
-**`plex-episode-prediction`** (default) — Episode lookahead tailored for Plex. Pre-caches the next N episodes after any file open. Intelligently filters out Plex's background analysis processes (Media Scanner, EAE Service, Fingerprinter, intro/credit detection transcoders) so only real user playback drives the prediction. Recommended for Plex users.
+### `plex-episode-prediction` (default)
 
-**`episode-prediction`** — Same lookahead logic without Plex-specific filtering. Good for other media players or servers.
+Episode lookahead tailored for Plex. Pre-caches the next N episodes after any file open. Intelligently filters out Plex's background analysis processes (Media Scanner, EAE Service, Fingerprinter, intro/credit detection transcoders) so only real user playback drives the prediction. Supports two modes:
 
-**`cache-on-miss`** — Cache only what is accessed. No lookahead — just transparently promotes files to SSD as they're opened.
+- **`miss-only`** (default) — predict and cache ahead only on a cache miss
+- **`rolling-buffer`** — keep the next N episodes loaded at all times, re-predicting on every access
 
-Set via `[preset] name` in `config.toml`.
+The `episode-prediction` name is accepted as an alias.
+
+Configured via the `[plex]` section.
+
+### `prefetch`
+
+General-purpose preset with three caching modes and optional regex filtering. Not Plex-specific — works for any file workload.
+
+**Modes:**
+
+- **`cache-hit-only`** — cache only the file that was accessed. Safest, no fan-out. (This is what the old `cache-on-miss` preset did.)
+- **`cache-neighbors`** — cache all sibling files in the same directory. Good for media folders where related files (episodes, artwork, metadata) live side by side.
+- **`cache-parent-recursively`** — recursively cache the entire parent directory up to `max_depth` levels deep. Aggressive, but useful when a single access should warm an entire show or album.
+
+**Filtering:**
+
+- **`file_whitelist`** — regex patterns matched against filename. Only matching files are cached. Empty list means allow all.
+- **`file_blacklist`** — regex patterns matched against filename. Matching files are never cached. Blacklist is checked first and always wins over whitelist.
+- **`process_blocklist`** — process names (and their children) that must never trigger caching.
+
+All regex patterns are compiled at startup. Invalid patterns cause the daemon to refuse to start — no silent failures at runtime.
+
+Configured via the `[prefetch]` section.
+
+### `cache-on-miss` (deprecated)
+
+Still accepted for backward compatibility — maps to `prefetch` with `cache-hit-only` mode and no filters. Logs a deprecation warning on startup. Use `prefetch` directly for new configs.
+
+Set the preset via `[preset] name` in `config.toml`.
 
 ---
 
@@ -76,12 +113,13 @@ The release includes the binary, a default `config.toml`, and the LICENSE.
 
 ### 2. Configure
 
-Edit `config.toml` in the same directory as the binary. At minimum, set two paths:
+Edit `config.toml` in the same directory as the binary. At minimum, set three values:
 
 ```toml
 [paths]
-target_directories = ["/mnt/media"]   # media directories Plex reads from (can list multiple)
+target_directories = ["/mnt/media"]   # directories to overmount (can list multiple)
 cache_directory    = "/mnt/ssd-cache" # SSD path for cached files
+instance_name      = "my-media"       # unique name for this instance (used for DB and process lock)
 ```
 
 See the full [Settings](#settings) section below for all options.
@@ -101,9 +139,9 @@ cd /opt/fscache
 sudo ./fscache
 ```
 
-That's it. The cache is active and Plex doesn't need any changes. Stop it with `Ctrl+C` — the mount detaches cleanly.
+That's it. The cache is active and filesystem doesn't need any changes. Stop it with `Ctrl+C` — the mount detaches cleanly. LET IT DO IT'S THING, DO NOT DOUBLE TAP CTRL+C.
 
-Add `--tui` to run with a live dashboard showing cache stats, active copies, and logs.
+If you want to monitor it with the GUI, simply run ./fscache watch.
 
 ---
 
@@ -145,25 +183,53 @@ sudo cp target/release/fscache /usr/local/bin/
 |---|---|
 | `paths.target_directories` | List of media directories Plex reads from (each will be FUSE overmounted) |
 | `paths.cache_directory` | SSD path where cached files are stored |
+| `paths.instance_name` | Unique name for this instance — used for DB filename and process lock |
 
 ### Preset
 
 | Setting | Default | Description |
 |---|---|---|
-| `preset.name` | `plex-episode-prediction` | `plex-episode-prediction`, `episode-prediction`, or `cache-on-miss` |
-| `preset.lookahead` | `4` | Episodes to pre-cache ahead of current position (episode prediction presets) |
+| `preset.name` | `plex-episode-prediction` | `plex-episode-prediction`, `prefetch`, or `cache-on-miss` (deprecated) |
+
+### Plex Episode Prediction
+
+Used when `preset.name` is `plex-episode-prediction` (or `episode-prediction`).
+
+| Setting | Default | Description |
+|---|---|---|
+| `plex.lookahead` | `4` | Episodes to pre-cache ahead of current position |
+| `plex.mode` | `miss-only` | `miss-only` (predict on miss) or `rolling-buffer` (keep next N always loaded) |
+| `plex.process_blocklist` | `[]` | Process names that must never trigger prediction |
+
+### Prefetch
+
+Used when `preset.name` is `prefetch`.
+
+| Setting | Default | Description |
+|---|---|---|
+| `prefetch.mode` | `cache-hit-only` | `cache-hit-only`, `cache-neighbors`, or `cache-parent-recursively` |
+| `prefetch.max_depth` | `3` | Max recursion depth for `cache-parent-recursively` mode |
+| `prefetch.process_blocklist` | `[]` | Process names that must never trigger caching |
+| `prefetch.file_whitelist` | `[]` | Regex patterns — only matching filenames are cached (empty = allow all) |
+| `prefetch.file_blacklist` | `[]` | Regex patterns — matching filenames are never cached (checked before whitelist) |
+
+### Eviction
+
+| Setting | Default | Description |
+|---|---|---|
+| `eviction.max_size_gb` | `200.0` | Max total SSD cache size across all mounts |
+| `eviction.expiry_hours` | `72` | Remove cached files not accessed within this window |
+| `eviction.min_free_space_gb` | `10.0` | Stop caching if SSD free space drops below this |
 
 ### Cache
 
 | Setting | Default | Description |
 |---|---|---|
-| `cache.max_size_gb` | `200.0` | Max total SSD cache size across all mounts |
-| `cache.expiry_hours` | `72` | Remove cached files not accessed within this window |
-| `cache.min_free_space_gb` | `10.0` | Stop caching if SSD free space drops below this |
+| `cache.passthrough_mode` | `false` | Bypass cache entirely — useful for debugging |
 | `cache.max_cache_pull_per_mount_gb` | `0.0` (unlimited) | Cap per-mount lookahead pull per session |
 | `cache.deferred_ttl_minutes` | `1440` | Discard buffered events (from outside caching window) older than this on startup |
-| `cache.passthrough_mode` | `false` | Bypass cache entirely — useful for debugging |
-| `cache.process_blocklist` | `[]` | Process names (and their children) that must never trigger caching |
+| `cache.min_access_secs` | `0` | Minimum seconds a file must stay open before prediction triggers |
+| `cache.min_file_size_mb` | `0` | Skip files below this size in MB — filters metadata/subtitle noise |
 
 ### Schedule
 
@@ -191,18 +257,26 @@ Accesses outside the window are buffered and flushed when the window re-opens.
 [paths]
 target_directories = ["/mnt/media", "/mnt/media2"]
 cache_directory    = "/mnt/ssd-cache"
+instance_name      = "plex-movies"
 
 [preset]
-name      = "plex-episode-prediction"
-lookahead = 4
+name = "plex-episode-prediction"
+
+[plex]
+lookahead         = 4
+mode              = "miss-only"
+process_blocklist = ["Plex Media Scanner", "Plex EAE Service", "Plex Media Fingerprinter"]
+
+[eviction]
+max_size_gb       = 200.0
+expiry_hours      = 72
+min_free_space_gb = 10.0
 
 [cache]
-max_size_gb                 = 200.0
-expiry_hours                = 72
-min_free_space_gb           = 10.0
+passthrough_mode            = false
 max_cache_pull_per_mount_gb = 0.0
-deferred_ttl_minutes        = 1440
-process_blocklist           = ["Plex Media Scanner", "Plex EAE Service", "Plex Media Fingerprinter"]
+min_access_secs             = 0
+min_file_size_mb            = 0
 
 [schedule]
 cache_window_start = "08:00"
@@ -213,4 +287,17 @@ log_directory          = "/var/log/fscache"
 console_level          = "info"
 file_level             = "debug"
 repeat_log_window_secs = 300
+```
+
+### Prefetch example
+
+```toml
+[preset]
+name = "prefetch"
+
+[prefetch]
+mode              = "cache-neighbors"
+max_depth         = 3
+file_blacklist    = ["\\.nfo$", "\\.jpg$"]
+# file_whitelist  = ["\\.mkv$", "\\.mp4$"]
 ```

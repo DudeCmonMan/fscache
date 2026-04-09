@@ -1,5 +1,3 @@
-use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use tracing::Level;
@@ -11,8 +9,6 @@ use crate::telemetry;
 use crate::utils::fmt_time;
 use super::protocol::{DaemonMessage, LogLine, TelemetryEvent};
 
-const RECENT_LOG_CAP: usize = 100;
-
 /// A `tracing::Layer` that acts as an IPC broadcast bridge.
 ///
 /// Subscribes to the same structured events as `MetricsLayer` and `LoggingLayer`
@@ -22,37 +18,23 @@ const RECENT_LOG_CAP: usize = 100;
 /// All three subscriber outputs — console `fmt`, file `fmt`, and this IPC layer —
 /// receive the exact same tracing events. Future logging categories are
 /// automatically available to every subscriber with no per-output wiring.
+///
+/// The replay ring buffer is maintained by a separate subscriber task in
+/// `ipc::recent_logs`, keeping this layer as a pure forwarder.
 pub struct IpcBroadcastLayer {
     tx: broadcast::Sender<DaemonMessage>,
     /// Maximum level to forward as `DaemonMessage::Log`. Telemetry `Event`s are
     /// always forwarded regardless of level. Set to `Level::INFO` for normal use;
     /// `Level::DEBUG` to forward debug output to the TUI log panel.
     log_level: Level,
-    /// Ring buffer of recent messages for replay to newly connecting clients.
-    recent: Arc<Mutex<VecDeque<DaemonMessage>>>,
 }
 
 impl IpcBroadcastLayer {
     pub fn new(
         tx: broadcast::Sender<DaemonMessage>,
         log_level: Level,
-        recent: Arc<Mutex<VecDeque<DaemonMessage>>>,
     ) -> Self {
-        Self { tx, log_level, recent }
-    }
-
-    fn send(&self, msg: DaemonMessage) {
-        // Push to ring buffer before broadcasting so new clients can replay it.
-        {
-            let mut buf = self.recent.lock().unwrap();
-            if buf.len() >= RECENT_LOG_CAP {
-                buf.pop_front();
-            }
-            buf.push_back(msg.clone());
-        }
-        // `send` errors when there are no receivers — expected when no TUI is
-        // connected. Silently drop to avoid polluting logs.
-        let _ = self.tx.send(msg);
+        Self { tx, log_level }
     }
 }
 
@@ -115,7 +97,7 @@ where
         };
 
         if let Some(msg) = telemetry_msg {
-            self.send(msg);
+            let _ = self.tx.send(msg);
         }
 
         // --- Log forwarding ---
@@ -137,7 +119,7 @@ where
                 message.push_str(&format!("  ({})", reason));
             }
 
-            self.send(DaemonMessage::Log(LogLine {
+            let _ = self.tx.send(DaemonMessage::Log(LogLine {
                 timestamp: fmt_time(SystemTime::now()),
                 level: level_str.to_string(),
                 message,

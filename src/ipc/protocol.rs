@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
+use crate::config::Config;
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "type")]
 pub enum DaemonMessage {
@@ -13,21 +15,19 @@ pub enum DaemonMessage {
 }
 
 /// Instance metadata sent as the first message on every new connection.
+///
+/// Contains the daemon's full `Config` so the TUI always has access to the
+/// complete configuration without cherry-picking fields. Adding a field to
+/// `Config` makes it automatically available to watch clients.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct HelloPayload {
     pub version: String,
     pub instance_name: String,
     pub mounts: Vec<MountInfoWire>,
-    pub window_start: String,
-    pub window_end: String,
-    pub preset_name: String,
-    pub budget_max_bytes: u64,
-    pub min_free_bytes: u64,
-    pub expiry_secs: u64,
     /// Absolute path to the per-instance SQLite database.
     pub db_path: String,
-    /// Base cache directory (for display purposes).
-    pub cache_directory: String,
+    /// Full daemon configuration (eviction values are pre-resolved from legacy fields).
+    pub config: Config,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

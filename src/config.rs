@@ -1,8 +1,8 @@
 use anyhow::Context;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
     pub paths: PathsConfig,
     #[serde(default)]
@@ -21,7 +21,7 @@ pub struct Config {
     pub logging: LoggingConfig,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PathsConfig {
     pub target_directories: Vec<String>,
     pub cache_directory: String,
@@ -30,7 +30,7 @@ pub struct PathsConfig {
     pub instance_name: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct CacheConfig {
     /// Deprecated: use [eviction].max_size_gb instead.
     pub max_size_gb: Option<f64>,
@@ -70,7 +70,7 @@ impl Default for CacheConfig {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct EvictionConfig {
     /// Eviction strategy — only "lru" supported for now (future-proofing).
     #[serde(default = "default_eviction_strategy")]
@@ -136,7 +136,7 @@ pub struct ResolvedEviction {
     pub min_free_space_gb: f64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PrefetchConfig {
     /// "cache-hit-only" | "cache-neighbors" | "cache-parent-recursively"
     #[serde(default = "default_prefetch_mode")]
@@ -169,7 +169,7 @@ impl Default for PrefetchConfig {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PresetConfig {
     /// Which preset to use: "plex-episode-prediction", "prefetch", or "cache-on-miss" (deprecated alias for prefetch cache-hit-only).
     #[serde(default = "default_preset_name")]
@@ -182,7 +182,7 @@ impl Default for PresetConfig {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PlexConfig {
     /// Episodes to cache ahead of the current one.
     #[serde(default = "default_lookahead")]
@@ -206,7 +206,7 @@ impl Default for PlexConfig {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ScheduleConfig {
     #[serde(default = "default_window_start")]
     pub cache_window_start: String,
@@ -223,7 +223,7 @@ impl Default for ScheduleConfig {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LoggingConfig {
     #[serde(default = "default_log_directory")]
     pub log_directory: String,

@@ -66,7 +66,7 @@ async fn main() -> anyhow::Result<()> {
 // ---------------------------------------------------------------------------
 
 async fn run_daemon(config_path: Option<PathBuf>) -> anyhow::Result<()> {
-    let (config, cfg_path) = match config_path {
+    let (mut config, cfg_path) = match config_path {
         Some(ref path) => config::load_from(path)?,
         None => config::load()?,
     };
@@ -80,7 +80,7 @@ async fn run_daemon(config_path: Option<PathBuf>) -> anyhow::Result<()> {
         .parse()
         .unwrap_or(Level::INFO);
 
-    let recent_logs: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<ipc::protocol::DaemonMessage>>>
+    let recent_logs: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<ipc::protocol::LogLine>>>
         = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
 
     let console_filter = tracing_subscriber::EnvFilter::try_from_default_env()
@@ -113,9 +113,10 @@ async fn run_daemon(config_path: Option<PathBuf>) -> anyhow::Result<()> {
         .with(ipc::broadcast_layer::IpcBroadcastLayer::new(
             ipc_tx.clone(),
             ipc_log_level,
-            recent_logs.clone(),
         ))
         .init();
+
+    ipc::recent_logs::spawn_recent_logs_task(ipc_tx.subscribe(), recent_logs.clone());
 
     tracing::info!("fscache {} starting", BUILD_VERSION);
     tracing::info!("Config: {}", cfg_path.display());
@@ -152,6 +153,11 @@ async fn run_daemon(config_path: Option<PathBuf>) -> anyhow::Result<()> {
     }));
 
     let eviction = config::EvictionConfig::resolve(&config.eviction, &config.cache);
+    // Write resolved eviction values back so Hello carries effective values,
+    // not the raw (possibly legacy-field) originals.
+    config.eviction.max_size_gb = eviction.max_size_gb;
+    config.eviction.expiry_hours = eviction.expiry_hours;
+    config.eviction.min_free_space_gb = eviction.min_free_space_gb;
 
     let max_cache_pull_bytes =
         (config.cache.max_cache_pull_per_mount_gb * 1_073_741_824.0) as u64;
@@ -173,17 +179,11 @@ async fn run_daemon(config_path: Option<PathBuf>) -> anyhow::Result<()> {
         .collect();
 
     let hello = ipc::protocol::DaemonMessage::Hello(ipc::protocol::HelloPayload {
-        version:        BUILD_VERSION.to_string(),
-        instance_name:  instance_name.clone(),
-        mounts:         mount_info_wire,
-        window_start:   config.schedule.cache_window_start.clone(),
-        window_end:     config.schedule.cache_window_end.clone(),
-        preset_name:    config.preset.name.clone(),
-        budget_max_bytes: max_cache_pull_bytes,
-        min_free_bytes: (eviction.min_free_space_gb * 1_073_741_824.0) as u64,
-        expiry_secs:    eviction.expiry_hours * 3600,
-        db_path:        db_path.to_string_lossy().into_owned(),
-        cache_directory: config.paths.cache_directory.clone(),
+        version:       BUILD_VERSION.to_string(),
+        instance_name: instance_name.clone(),
+        mounts:        mount_info_wire,
+        db_path:       db_path.to_string_lossy().into_owned(),
+        config:        config.clone(),
     });
 
     // Bind early (before FUSE mounts) to minimise discovery gap for `fscache watch`.
@@ -195,7 +195,6 @@ async fn run_daemon(config_path: Option<PathBuf>) -> anyhow::Result<()> {
         shutdown_rx.clone(),
         recent_logs,
         Arc::clone(&db),
-        base_cache_dir.clone(),
     ));
 
     tracing::info!(

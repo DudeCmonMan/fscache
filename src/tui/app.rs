@@ -30,7 +30,7 @@ const POLL_TICK_SECS: u64 = 3;
 pub async fn run_client(socket_path: PathBuf) -> anyhow::Result<()> {
     let (hello, mut reader, writer) = client::connect(&socket_path).await?;
 
-    let state = Arc::new(DashboardState::new());
+    let state = Arc::new(DashboardState::new(Arc::new(hello.config)));
     {
         let mut mounts = state.mounts.lock().unwrap();
         for m in &hello.mounts {
@@ -40,15 +40,6 @@ pub async fn run_client(socket_path: PathBuf) -> anyhow::Result<()> {
                 active:    m.active,
             });
         }
-        *state.window_start.lock().unwrap() = hello.window_start.clone();
-        *state.window_end.lock().unwrap()   = hello.window_end.clone();
-        *state.preset_name.lock().unwrap()  = hello.preset_name.clone();
-        if hello.budget_max_bytes > 0 {
-            state.budget_max_bytes.store(hello.budget_max_bytes, Relaxed);
-        }
-        state.cache_max_bytes.store(hello.budget_max_bytes, Relaxed);
-        state.cache_min_free_bytes.store(hello.min_free_bytes, Relaxed);
-        state.expiry_secs.store(hello.expiry_secs, Relaxed);
     }
 
     let db_path = PathBuf::from(&hello.db_path);
@@ -353,7 +344,7 @@ fn poll_cache_stats(state: &Arc<DashboardState>, db: &Arc<CacheDb>, mount_dirs: 
     let mut combined:   Vec<CachedFileInfo> = Vec::new();
     let mut free_bytes: Option<u64> = None;
 
-    let expiry = Duration::from_secs(state.expiry_secs.load(Relaxed));
+    let expiry = Duration::from_secs(state.config.eviction.expiry_hours * 3600);
 
     for cache_dir in mount_dirs {
         let mount_id = cache_dir.to_string_lossy().into_owned();

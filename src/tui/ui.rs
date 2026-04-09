@@ -109,8 +109,8 @@ fn render_scheduler_and_cache(f: &mut Frame, area: Rect, state: &DashboardState)
     } else {
         ("○ CLOSED", Color::Red)
     };
-    let w_start = state.window_start.lock().unwrap().clone();
-    let w_end   = state.window_end.lock().unwrap().clone();
+    let w_start = &state.config.schedule.cache_window_start;
+    let w_end   = &state.config.schedule.cache_window_end;
     let window_str = if w_start.is_empty() {
         "not configured".to_string()
     } else {
@@ -129,9 +129,9 @@ fn render_scheduler_and_cache(f: &mut Frame, area: Rect, state: &DashboardState)
     );
 
     let used  = state.cache_used_bytes.load(Relaxed);
-    let max   = state.cache_max_bytes.load(Relaxed);
+    let max   = (state.config.eviction.max_size_gb * 1_073_741_824.0) as u64;
     let free  = state.cache_free_bytes.load(Relaxed);
-    let min_f = state.cache_min_free_bytes.load(Relaxed);
+    let min_f = (state.config.eviction.min_free_space_gb * 1_073_741_824.0) as u64;
     let files = state.cache_file_count.load(Relaxed);
 
     let ratio = if max > 0 { (used as f64 / max as f64).clamp(0.0, 1.0) } else { 0.0 };
@@ -171,7 +171,7 @@ fn render_predictor(f: &mut Frame, area: Rect, state: &DashboardState) {
     let deferred  = state.deferred_count.load(Relaxed);
     let b_used    = state.budget_used_bytes.load(Relaxed);
     let b_max     = state.budget_max_bytes.load(Relaxed);
-    let preset    = state.preset_name.lock().unwrap().clone();
+    let preset    = state.config.preset.name.clone();
 
     let budget_str = if b_max > 0 {
         format!("Budget: {:.1} / {:.1} GB", gb(b_used), gb(b_max))

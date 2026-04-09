@@ -7,7 +7,7 @@ use tokio::sync::{broadcast, watch};
 use tokio::time::{timeout, Duration};
 
 use crate::cache::db::CacheDb;
-use super::protocol::{ClientMessage, DaemonMessage};
+use super::protocol::{ClientMessage, DaemonMessage, LogLine};
 use super::{framed_split, recv_msg, send_msg};
 
 /// Bind a Unix domain socket at `socket_path` and serve connected TUI clients.
@@ -22,9 +22,8 @@ pub async fn run_ipc_server(
     events: broadcast::Sender<DaemonMessage>,
     shutdown_tx: watch::Sender<bool>,
     mut shutdown_rx: watch::Receiver<bool>,
-    recent: Arc<Mutex<VecDeque<DaemonMessage>>>,
+    recent: Arc<Mutex<VecDeque<LogLine>>>,
     db: Arc<CacheDb>,
-    cache_directory: PathBuf,
 ) -> anyhow::Result<()> {
     // Stale socket detection: if we can connect, another daemon is alive.
     // (Normally impossible since the instance lock prevents this, but be
@@ -63,10 +62,9 @@ pub async fn run_ipc_server(
                         let peer_path    = socket_path.clone();
                         let recent_clone = Arc::clone(&recent);
                         let db_clone     = Arc::clone(&db);
-                        let cache_dir    = cache_directory.clone();
                         tokio::spawn(async move {
                             let peer = format!("client@{}", peer_path.display());
-                            if let Err(e) = handle_client(stream, hello_clone, &mut rx, sd_tx, recent_clone, db_clone, cache_dir).await {
+                            if let Err(e) = handle_client(stream, hello_clone, &mut rx, sd_tx, recent_clone, db_clone).await {
                                 tracing::debug!("{peer} disconnected: {e}");
                             } else {
                                 tracing::debug!("{peer} disconnected cleanly");
@@ -103,22 +101,21 @@ async fn handle_client(
     hello: DaemonMessage,
     rx: &mut broadcast::Receiver<DaemonMessage>,
     shutdown_tx: watch::Sender<bool>,
-    recent: Arc<Mutex<VecDeque<DaemonMessage>>>,
+    recent: Arc<Mutex<VecDeque<LogLine>>>,
     db: Arc<CacheDb>,
-    _cache_directory: PathBuf,
 ) -> anyhow::Result<()> {
     let (mut reader, mut writer) = framed_split(stream);
 
     send_msg(&mut writer, &hello).await?;
 
-    // Replay recent messages so the client doesn't start with an empty view.
+    // Replay recent log lines so the client doesn't start with an empty log view.
     // The broadcast subscription (rx) was created before this point, so any
     // messages arriving during replay also queue in rx — minor duplicates are
     // acceptable.
     {
-        let snapshot: Vec<DaemonMessage> = recent.lock().unwrap().iter().cloned().collect();
-        for msg in snapshot {
-            send_msg(&mut writer, &msg).await?;
+        let snapshot: Vec<LogLine> = recent.lock().unwrap().iter().cloned().collect();
+        for line in snapshot {
+            send_msg(&mut writer, &DaemonMessage::Log(line)).await?;
         }
     }
 

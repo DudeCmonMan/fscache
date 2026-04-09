@@ -19,15 +19,36 @@ use std::time::Duration;
 use tokio::sync::{broadcast, watch};
 
 use fscache::cache::db::CacheDb;
+use fscache::config::{
+    CacheConfig, Config, EvictionConfig, LoggingConfig, PathsConfig, PlexConfig,
+    PrefetchConfig, PresetConfig, ScheduleConfig,
+};
 use fscache::ipc::client;
 use fscache::ipc::protocol::{
-    ClientMessage, DaemonMessage, FileTarget, HelloPayload, MountInfoWire, TelemetryEvent,
+    ClientMessage, DaemonMessage, FileTarget, HelloPayload, LogLine, MountInfoWire, TelemetryEvent,
 };
 use fscache::ipc::server::run_ipc_server;
 use fscache::ipc::{framed_split, recv_msg, send_msg};
 use fscache::tui::state::DashboardState;
 
-fn empty_recent() -> Arc<Mutex<VecDeque<DaemonMessage>>> {
+fn test_config() -> Arc<Config> {
+    Arc::new(Config {
+        paths: PathsConfig {
+            target_directories: vec!["/mnt/test".to_string()],
+            cache_directory: "/tmp/fscache-cache".to_string(),
+            instance_name: "test-instance".to_string(),
+        },
+        cache:    CacheConfig::default(),
+        eviction: EvictionConfig::default(),
+        preset:   PresetConfig::default(),
+        prefetch: PrefetchConfig::default(),
+        plex:     PlexConfig::default(),
+        schedule: ScheduleConfig::default(),
+        logging:  LoggingConfig::default(),
+    })
+}
+
+fn empty_recent() -> Arc<Mutex<VecDeque<LogLine>>> {
     Arc::new(Mutex::new(VecDeque::new()))
 }
 
@@ -37,21 +58,15 @@ fn in_memory_db() -> Arc<CacheDb> {
 
 fn make_hello(socket_str: &str) -> (DaemonMessage, HelloPayload) {
     let payload = HelloPayload {
-        version:         "test-v0".to_string(),
-        instance_name:   "test-instance".to_string(),
-        mounts:          vec![MountInfoWire {
+        version:       "test-v0".to_string(),
+        instance_name: "test-instance".to_string(),
+        mounts: vec![MountInfoWire {
             target:    PathBuf::from("/mnt/test"),
             cache_dir: PathBuf::from("/tmp/fscache-cache"),
             active:    true,
         }],
-        window_start:    "00:00".to_string(),
-        window_end:      "23:59".to_string(),
-        preset_name:     "cache-on-miss".to_string(),
-        budget_max_bytes: 10 * 1024 * 1024 * 1024,
-        min_free_bytes:  1024 * 1024 * 1024,
-        expiry_secs:     3600 * 24,
-        db_path:         format!("{socket_str}.db"),
-        cache_directory: "/tmp/fscache-cache".to_string(),
+        db_path: format!("{socket_str}.db"),
+        config:  (*test_config()).clone(),
     };
     (DaemonMessage::Hello(payload.clone()), payload)
 }
@@ -76,7 +91,6 @@ async fn ipc_hello_received_and_fields_match() {
         sd_rx,
         empty_recent(),
         in_memory_db(),
-        PathBuf::from("/tmp"),
     ));
 
     // Give the server time to bind.
@@ -90,8 +104,8 @@ async fn ipc_hello_received_and_fields_match() {
     assert_eq!(hello.instance_name, expected.instance_name);
     assert_eq!(hello.mounts.len(),  1);
     assert_eq!(hello.mounts[0].target, PathBuf::from("/mnt/test"));
-    assert_eq!(hello.preset_name,   expected.preset_name);
-    assert_eq!(hello.expiry_secs,   expected.expiry_secs);
+    assert_eq!(hello.config.preset.name,       expected.config.preset.name);
+    assert_eq!(hello.config.eviction.expiry_hours, expected.config.eviction.expiry_hours);
 
     server_task.abort();
 }
@@ -106,7 +120,7 @@ async fn ipc_events_applied_to_dashboard_state() {
     let (hello_msg, _) = make_hello(&socket_path.to_string_lossy());
 
     let sp = socket_path.clone();
-    tokio::spawn(run_ipc_server(sp, hello_msg, ipc_tx.clone(), sd_tx, sd_rx, empty_recent(), in_memory_db(), PathBuf::from("/tmp")));
+    tokio::spawn(run_ipc_server(sp, hello_msg, ipc_tx.clone(), sd_tx, sd_rx, empty_recent(), in_memory_db()));
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -114,7 +128,7 @@ async fn ipc_events_applied_to_dashboard_state() {
     let (_hello, mut reader, _writer) = client::connect(&socket_path).await.unwrap();
 
     // Start stream processor on a local DashboardState.
-    let state = Arc::new(DashboardState::new());
+    let state = Arc::new(DashboardState::new(test_config()));
     let state_clone = Arc::clone(&state);
     tokio::spawn(async move {
         let _ = client::run_client_stream(&mut reader, state_clone).await;
@@ -143,8 +157,6 @@ async fn ipc_events_applied_to_dashboard_state() {
 
 #[tokio::test]
 async fn ipc_log_lines_pushed_to_ring_buffer() {
-    use fscache::ipc::protocol::LogLine;
-
     let tmp = tempfile::tempdir().unwrap();
     let socket_path = tmp.path().join("logs.sock");
 
@@ -153,11 +165,11 @@ async fn ipc_log_lines_pushed_to_ring_buffer() {
     let (hello_msg, _) = make_hello(&socket_path.to_string_lossy());
 
     let sp = socket_path.clone();
-    tokio::spawn(run_ipc_server(sp, hello_msg, ipc_tx.clone(), sd_tx, sd_rx, empty_recent(), in_memory_db(), PathBuf::from("/tmp")));
+    tokio::spawn(run_ipc_server(sp, hello_msg, ipc_tx.clone(), sd_tx, sd_rx, empty_recent(), in_memory_db()));
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let (_hello, mut reader, _writer) = client::connect(&socket_path).await.unwrap();
-    let state = Arc::new(DashboardState::new());
+    let state = Arc::new(DashboardState::new(test_config()));
     let state_clone = Arc::clone(&state);
     tokio::spawn(async move {
         let _ = client::run_client_stream(&mut reader, state_clone).await;
@@ -186,7 +198,7 @@ async fn ipc_client_shutdown_triggers_daemon_signal() {
     let (hello_msg, _) = make_hello(&socket_path.to_string_lossy());
 
     let sp = socket_path.clone();
-    tokio::spawn(run_ipc_server(sp, hello_msg, ipc_tx, sd_tx, sd_rx.clone(), empty_recent(), in_memory_db(), PathBuf::from("/tmp")));
+    tokio::spawn(run_ipc_server(sp, hello_msg, ipc_tx, sd_tx, sd_rx.clone(), empty_recent(), in_memory_db()));
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Connect with raw framed stream so we can send ClientMessage directly.
@@ -220,7 +232,7 @@ async fn ipc_goodbye_on_daemon_shutdown() {
     let (hello_msg, _) = make_hello(&socket_path.to_string_lossy());
 
     let sp = socket_path.clone();
-    tokio::spawn(run_ipc_server(sp, hello_msg, ipc_tx, sd_tx.clone(), sd_rx, empty_recent(), in_memory_db(), PathBuf::from("/tmp")));
+    tokio::spawn(run_ipc_server(sp, hello_msg, ipc_tx, sd_tx.clone(), sd_rx, empty_recent(), in_memory_db()));
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let stream = tokio::net::UnixStream::connect(&socket_path).await.unwrap();
@@ -256,7 +268,7 @@ async fn ipc_discover_finds_running_instance() {
     let (sd_tx, sd_rx) = watch::channel(false);
 
     let sp_clone = sp.clone();
-    let server = tokio::spawn(run_ipc_server(sp_clone, hello_msg, ipc_tx, sd_tx, sd_rx, empty_recent(), in_memory_db(), PathBuf::from("/tmp")));
+    let server = tokio::spawn(run_ipc_server(sp_clone, hello_msg, ipc_tx, sd_tx, sd_rx, empty_recent(), in_memory_db()));
 
     tokio::time::sleep(Duration::from_millis(80)).await;
 
@@ -319,12 +331,12 @@ async fn full_pipeline_tracing_through_ipc_to_dashboard() {
     // #[tokio::test] uses a single-threaded runtime, so every spawned task
     // runs on this thread and sees this subscriber.
     let subscriber = tracing_subscriber::registry()
-        .with(IpcBroadcastLayer::new(ipc_tx.clone(), tracing::Level::INFO, Arc::clone(&recent)));
+        .with(IpcBroadcastLayer::new(ipc_tx.clone(), tracing::Level::INFO));
     let _guard = tracing::subscriber::set_default(subscriber);
 
     // ---- Start IPC server ----
     let sp = socket_path.clone();
-    tokio::spawn(run_ipc_server(sp, hello_msg, ipc_tx, sd_tx, sd_rx, recent, Arc::clone(&db), cache_dir.clone()));
+    tokio::spawn(run_ipc_server(sp, hello_msg, ipc_tx, sd_tx, sd_rx, recent, Arc::clone(&db)));
 
     // Let the server bind.
     tokio::time::sleep(Duration::from_millis(50)).await;
@@ -334,7 +346,7 @@ async fn full_pipeline_tracing_through_ipc_to_dashboard() {
         .await
         .expect("connect should succeed");
 
-    let state = Arc::new(DashboardState::new());
+    let state = Arc::new(DashboardState::new(test_config()));
     let state_clone = Arc::clone(&state);
     tokio::spawn(async move {
         let _ = client::run_client_stream(&mut reader, state_clone).await;
@@ -488,8 +500,6 @@ async fn full_pipeline_tracing_through_ipc_to_dashboard() {
 
 #[tokio::test]
 async fn ipc_replay_recent_logs_on_connect() {
-    use fscache::ipc::protocol::LogLine;
-
     let tmp = tempfile::tempdir().unwrap();
     let socket_path = tmp.path().join("replay.sock");
 
@@ -497,28 +507,27 @@ async fn ipc_replay_recent_logs_on_connect() {
     let (sd_tx, sd_rx) = watch::channel(false);
     let (hello_msg, _) = make_hello(&socket_path.to_string_lossy());
 
-    // Pre-populate the ring buffer with messages before any client connects.
+    // Pre-populate the ring buffer with log lines before any client connects.
+    // Only LogLine entries are stored — telemetry events are never in the ring.
     let recent = empty_recent();
     {
         let mut buf = recent.lock().unwrap();
         for i in 0..5 {
-            buf.push_back(DaemonMessage::Log(LogLine {
+            buf.push_back(LogLine {
                 timestamp: format!("12:00:0{i}"),
                 level: "INFO ".to_string(),
                 message: format!("pre-connect log {i}"),
-            }));
+            });
         }
-        buf.push_back(DaemonMessage::Event(TelemetryEvent::FuseOpen));
-        buf.push_back(DaemonMessage::Event(TelemetryEvent::CacheHit));
     }
 
     let sp = socket_path.clone();
-    tokio::spawn(run_ipc_server(sp, hello_msg, ipc_tx, sd_tx, sd_rx, recent, in_memory_db(), PathBuf::from("/tmp")));
+    tokio::spawn(run_ipc_server(sp, hello_msg, ipc_tx, sd_tx, sd_rx, recent, in_memory_db()));
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    // Connect a client — it should receive the replayed messages.
+    // Connect a client — it should receive the replayed log lines.
     let (_hello, mut reader, _writer) = client::connect(&socket_path).await.unwrap();
-    let state = Arc::new(DashboardState::new());
+    let state = Arc::new(DashboardState::new(test_config()));
     let state_clone = Arc::clone(&state);
     tokio::spawn(async move {
         let _ = client::run_client_stream(&mut reader, state_clone).await;
@@ -535,11 +544,6 @@ async fn ipc_replay_recent_logs_on_connect() {
     );
     assert_eq!(logs[0].message, "pre-connect log 0");
     assert_eq!(logs[4].message, "pre-connect log 4");
-    drop(logs);
-
-    // Verify replayed telemetry events were applied.
-    assert_eq!(state.fuse_opens.load(Relaxed), 1, "replayed fuse_opens");
-    assert_eq!(state.cache_hits.load(Relaxed), 1, "replayed cache_hits");
 }
 
 #[tokio::test]
@@ -567,7 +571,7 @@ async fn ipc_evict_files_removes_file_and_db_row() {
     let (hello_msg, _) = make_hello(&socket_path.to_string_lossy());
 
     let sp = socket_path.clone();
-    tokio::spawn(run_ipc_server(sp, hello_msg, ipc_tx, sd_tx, sd_rx, empty_recent(), Arc::clone(&db), tmp.path().to_path_buf()));
+    tokio::spawn(run_ipc_server(sp, hello_msg, ipc_tx, sd_tx, sd_rx, empty_recent(), Arc::clone(&db)));
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Connect and send EvictFiles.
@@ -617,7 +621,7 @@ async fn ipc_refresh_lease_updates_last_hit_at() {
     let (hello_msg, _) = make_hello(&socket_path.to_string_lossy());
 
     let sp = socket_path.clone();
-    tokio::spawn(run_ipc_server(sp, hello_msg, ipc_tx, sd_tx, sd_rx, empty_recent(), Arc::clone(&db), tmp.path().to_path_buf()));
+    tokio::spawn(run_ipc_server(sp, hello_msg, ipc_tx, sd_tx, sd_rx, empty_recent(), Arc::clone(&db)));
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     let stream = tokio::net::UnixStream::connect(&socket_path).await.unwrap();

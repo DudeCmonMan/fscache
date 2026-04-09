@@ -1,12 +1,17 @@
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
+
+use crate::config::Config;
 
 /// All state displayed by the TUI. Populated via IPC events from the daemon
 /// and a DB polling task for cache file stats.
 pub struct DashboardState {
+    // -- Full daemon config (from Hello, authoritative for all static values) --
+    pub config: Arc<Config>,
+
     // -- FUSE counters --
     pub fuse_opens:   AtomicU64,
     pub cache_hits:   AtomicU64,
@@ -15,19 +20,18 @@ pub struct DashboardState {
     pub open_handles: AtomicU64,
 
     // -- Cache stats (DB polling) --
-    pub cache_used_bytes:      AtomicU64,
-    pub cache_max_bytes:       AtomicU64,
-    pub cache_free_bytes:      AtomicU64,
-    pub cache_min_free_bytes:  AtomicU64,
-    pub cache_file_count:      AtomicU64,
-    pub cached_files:          Mutex<Vec<CachedFileInfo>>,
+    pub cache_used_bytes:  AtomicU64,
+    pub cache_free_bytes:  AtomicU64,
+    pub cache_file_count:  AtomicU64,
+    pub cached_files:      Mutex<Vec<CachedFileInfo>>,
 
-    // -- Action Engine --
+    // -- Action Engine (live counters updated from telemetry events) --
     pub in_flight_count:   AtomicU64,
     pub deferred_count:    AtomicU64,
     pub budget_used_bytes: AtomicU64,
+    /// Effective prediction budget in bytes. Seeded from config on connect, then
+    /// updated live by `TelemetryEvent::BudgetUpdated`.
     pub budget_max_bytes:  AtomicU64,
-    pub preset_name:       Mutex<String>,
 
     // -- Copier --
     pub active_copies:    Mutex<HashMap<PathBuf, CopyProgress>>,
@@ -40,40 +44,35 @@ pub struct DashboardState {
 
     // -- Scheduler --
     pub caching_allowed: AtomicBool,
-    pub window_start:    Mutex<String>,
-    pub window_end:      Mutex<String>,
 
     // -- Mounts (set once at startup) --
     pub mounts: Mutex<Vec<MountInfo>>,
-
-    // -- Cache expiry (from Hello, used to compute evicts_at in the file list) --
-    pub expiry_secs: AtomicU64,
 
     // -- Log capture --
     pub recent_logs: Mutex<VecDeque<LogEntry>>,
 }
 
 impl DashboardState {
-    pub fn new() -> Self {
+    pub fn new(config: Arc<Config>) -> Self {
+        let budget_max = (config.cache.max_cache_pull_per_mount_gb * 1_073_741_824.0) as u64;
         Self {
+            config,
+
             fuse_opens:   AtomicU64::new(0),
             cache_hits:   AtomicU64::new(0),
             cache_misses: AtomicU64::new(0),
             bytes_read:   AtomicU64::new(0),
             open_handles: AtomicU64::new(0),
 
-            cache_used_bytes:     AtomicU64::new(0),
-            cache_max_bytes:      AtomicU64::new(0),
-            cache_free_bytes:     AtomicU64::new(0),
-            cache_min_free_bytes: AtomicU64::new(0),
-            cache_file_count:     AtomicU64::new(0),
-            cached_files:         Mutex::new(Vec::new()),
+            cache_used_bytes:  AtomicU64::new(0),
+            cache_free_bytes:  AtomicU64::new(0),
+            cache_file_count:  AtomicU64::new(0),
+            cached_files:      Mutex::new(Vec::new()),
 
             in_flight_count:   AtomicU64::new(0),
             deferred_count:    AtomicU64::new(0),
             budget_used_bytes: AtomicU64::new(0),
-            budget_max_bytes:  AtomicU64::new(0),
-            preset_name:       Mutex::new(String::new()),
+            budget_max_bytes:  AtomicU64::new(budget_max),
 
             active_copies:    Mutex::new(HashMap::new()),
             completed_copies: AtomicU64::new(0),
@@ -83,12 +82,9 @@ impl DashboardState {
             evictions_size:    AtomicU64::new(0),
 
             caching_allowed: AtomicBool::new(false),
-            window_start:    Mutex::new(String::new()),
-            window_end:      Mutex::new(String::new()),
 
-            mounts:       Mutex::new(Vec::new()),
-            expiry_secs:  AtomicU64::new(0),
-            recent_logs:  Mutex::new(VecDeque::new()),
+            mounts:      Mutex::new(Vec::new()),
+            recent_logs: Mutex::new(VecDeque::new()),
         }
     }
 

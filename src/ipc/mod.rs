@@ -1,6 +1,7 @@
 pub mod broadcast_layer;
 pub mod client;
 pub mod protocol;
+pub mod recent_logs;
 pub mod server;
 
 use bytes::Bytes;

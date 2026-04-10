@@ -1,0 +1,40 @@
+# ──────────────────────────────────────────────────────────────────────────
+# fscache Docker E2E test stack
+#
+# Builds the image from source, starts fscache + a consumer container,
+# and lets run.sh drive assertions against them.
+#
+# Do not run directly — use: sudo ./tests/docker/run.sh
+# ──────────────────────────────────────────────────────────────────────────
+
+services:
+  fscache:
+    build:
+      context: ../..
+      dockerfile: docker/Dockerfile
+    container_name: fscache-test
+    cap_add: [SYS_ADMIN]
+    devices: ["/dev/fuse:/dev/fuse"]
+    security_opt: ["apparmor:unconfined"]
+    pid: host
+    volumes:
+      - ${TEST_MEDIA}:/media:rshared
+      - ${TEST_CACHE}:/cache
+      - ${TEST_STATE}:/var/lib/fscache
+      - ./test-config.toml:/etc/fscache/config.toml:ro
+    healthcheck:
+      test: ["CMD-SHELL", "grep -q fscache /proc/mounts"]
+      interval: 3s
+      timeout: 2s
+      retries: 30
+      start_period: 15s
+
+  consumer:
+    image: alpine:latest
+    container_name: fscache-test-consumer
+    depends_on:
+      fscache:
+        condition: service_healthy
+    volumes:
+      - ${TEST_MEDIA}:/media:rslave
+    command: ["sleep", "infinity"]

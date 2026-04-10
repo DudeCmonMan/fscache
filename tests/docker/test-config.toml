@@ -1,0 +1,29 @@
+[paths]
+target_directories = ["/media"]
+cache_directory    = "/cache"
+instance_name      = "fscache"
+
+[preset]
+name = "cache-on-miss"
+
+[eviction]
+max_size_gb        = 10.0
+expiry_hours       = 24
+min_free_space_gb  = 1.0
+
+[cache]
+passthrough_mode            = false
+min_access_secs             = 0
+min_file_size_mb            = 0
+max_cache_pull_per_mount_gb = 0.0
+deferred_ttl_minutes        = 1440
+
+[schedule]
+cache_window_start = "00:00"
+cache_window_end   = "23:59"
+
+[logging]
+log_directory          = "/var/log/fscache"
+console_level          = "debug"
+file_level             = "debug"
+repeat_log_window_secs = 0

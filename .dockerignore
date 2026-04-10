@@ -1,0 +1,10 @@
+target/
+.git/
+.gitignore
+*.md
+!docker/README.md
+claude-plans/
+sandbox/
+dist/
+tests/
+.claude/

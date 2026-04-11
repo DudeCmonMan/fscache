@@ -1,0 +1,1263 @@
+<!DOCTYPE html>
+<!--
+  ============================================================
+  AUTO-SYNCED FIELDS — managed by .github/workflows/pages.yml
+  ============================================================
+  These values are rewritten in the CI runner on every deploy.
+  Editing them by hand is harmless but pointless — the workflow
+  will overwrite them on the next push.
+
+    - Project name "fscache"  ← github.event.repository.name
+    - Version "v0.3.0"        ← Cargo.toml [package] version
+    - github.com/.../...      ← github.repository
+    - github.com/DudeCmonMan  ← github.repository_owner
+    - Latest release tag      ← gh release view (latest)
+
+  Everything else in this file is manually maintained. When you
+  add a setting, preset, or example config, edit it here.
+  ============================================================
+-->
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>fscache — Transparent SSD Caching for Read-Heavy Workloads</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Source+Serif+4:ital,opsz,wght@0,8..60,300;0,8..60,400;0,8..60,600;1,8..60,400&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #0c0e12;
+  --bg-raised: #13161c;
+  --bg-code: #181c24;
+  --bg-sidebar: #0f1116;
+  --border: #1e2330;
+  --border-active: #3b82f6;
+  --text: #c8cdd8;
+  --text-muted: #6b7280;
+  --text-bright: #e8ecf4;
+  --accent: #3b82f6;
+  --accent-glow: rgba(59, 130, 246, 0.15);
+  --green: #34d399;
+  --amber: #fbbf24;
+  --red: #f87171;
+  --pink: #f472b6;
+  --mono: 'JetBrains Mono', monospace;
+  --serif: 'Source Serif 4', Georgia, serif;
+  --sidebar-w: 280px;
+  --header-h: 56px;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html {
+  scroll-behavior: smooth;
+  scroll-padding-top: calc(var(--header-h) + 24px);
+}
+
+body {
+  font-family: var(--mono);
+  background: var(--bg);
+  color: var(--text);
+  font-size: 14px;
+  line-height: 1.7;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ─── HEADER ─── */
+header {
+  position: fixed;
+  top: 0; left: 0; right: 0;
+  height: var(--header-h);
+  background: rgba(12, 14, 18, 0.85);
+  backdrop-filter: blur(16px);
+  border-bottom: 1px solid var(--border);
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  padding: 0 24px;
+}
+
+.header-inner {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.logo {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  text-decoration: none;
+  color: var(--text-bright);
+}
+
+.logo-text {
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: -0.5px;
+}
+
+.logo-version {
+  font-size: 11px;
+  color: var(--text-muted);
+  background: var(--bg-raised);
+  padding: 2px 8px;
+  border-radius: 4px;
+  border: 1px solid var(--border);
+}
+
+.header-links {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.header-links a {
+  color: var(--text-muted);
+  text-decoration: none;
+  font-size: 13px;
+  transition: color 0.2s;
+}
+.header-links a:hover { color: var(--text-bright); }
+
+.gh-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text) !important;
+  font-size: 12px;
+  transition: all 0.2s;
+}
+.gh-btn:hover {
+  border-color: var(--text-muted);
+  color: var(--text-bright) !important;
+}
+.gh-btn svg { width: 16px; height: 16px; fill: currentColor; }
+
+.gh-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  color: var(--text-muted) !important;
+  font-size: 11px;
+  text-decoration: none;
+  transition: all 0.2s;
+}
+.gh-pill:hover {
+  border-color: var(--text-muted);
+  color: var(--text-bright) !important;
+}
+.gh-pill svg { width: 13px; height: 13px; fill: currentColor; flex-shrink: 0; }
+
+/* ─── MOBILE NAV TOGGLE ─── */
+.nav-toggle {
+  display: none;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 10px;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 18px;
+}
+
+/* ─── SIDEBAR ─── */
+.sidebar {
+  position: fixed;
+  top: var(--header-h);
+  left: 0;
+  bottom: 0;
+  width: var(--sidebar-w);
+  background: var(--bg-sidebar);
+  border-right: 1px solid var(--border);
+  overflow-y: auto;
+  padding: 24px 0;
+  z-index: 50;
+}
+
+.sidebar::-webkit-scrollbar { width: 4px; }
+.sidebar::-webkit-scrollbar-track { background: transparent; }
+.sidebar::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+.nav-section {
+  padding: 0 20px;
+  margin-bottom: 24px;
+}
+
+.nav-section-title {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 1.5px;
+  color: var(--text-muted);
+  margin-bottom: 10px;
+  font-weight: 600;
+}
+
+.nav-link {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  margin: 1px 0;
+  border-radius: 6px;
+  color: var(--text-muted);
+  text-decoration: none;
+  font-size: 13px;
+  transition: all 0.15s;
+  border-left: 2px solid transparent;
+}
+
+.nav-link:hover {
+  color: var(--text);
+  background: var(--bg-raised);
+}
+
+.nav-link.active {
+  color: var(--accent);
+  background: var(--accent-glow);
+  border-left-color: var(--accent);
+}
+
+.nav-link .dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.5;
+  flex-shrink: 0;
+}
+
+/* ─── MAIN ─── */
+main {
+  margin-left: var(--sidebar-w);
+  margin-top: var(--header-h);
+  min-height: calc(100vh - var(--header-h));
+}
+
+.content {
+  max-width: 860px;
+  margin: 0 auto;
+  padding: 48px 48px 96px;
+}
+
+/* ─── HERO ─── */
+.hero {
+  padding: 64px 0 56px;
+  border-bottom: 1px solid var(--border);
+  margin-bottom: 56px;
+}
+
+.hero-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  color: var(--green);
+  background: rgba(52, 211, 153, 0.08);
+  border: 1px solid rgba(52, 211, 153, 0.2);
+  padding: 4px 12px;
+  border-radius: 20px;
+  margin-bottom: 20px;
+  font-weight: 600;
+}
+.hero-badge::before {
+  content: '';
+  width: 6px; height: 6px;
+  background: var(--green);
+  border-radius: 50%;
+}
+
+.hero h1 {
+  font-family: var(--serif);
+  font-size: 42px;
+  font-weight: 600;
+  color: var(--text-bright);
+  line-height: 1.2;
+  margin-bottom: 20px;
+  letter-spacing: -0.5px;
+}
+
+.hero h1 em {
+  font-style: italic;
+  color: var(--accent);
+}
+
+.hero-desc {
+  font-size: 15px;
+  color: var(--text-muted);
+  max-width: 620px;
+  line-height: 1.8;
+}
+
+.hero-stats {
+  display: flex;
+  gap: 32px;
+  margin-top: 32px;
+  padding-top: 24px;
+  border-top: 1px solid var(--border);
+}
+
+.hero-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.hero-stat-value {
+  font-size: 20px;
+  font-weight: 700;
+  color: var(--text-bright);
+}
+
+.hero-stat-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+/* ─── SECTIONS ─── */
+.section {
+  margin-bottom: 64px;
+}
+
+.section-anchor {
+  display: block;
+  position: relative;
+  top: calc(-1 * var(--header-h) - 24px);
+  visibility: hidden;
+}
+
+h2 {
+  font-family: var(--serif);
+  font-size: 26px;
+  font-weight: 600;
+  color: var(--text-bright);
+  margin-bottom: 20px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+  letter-spacing: -0.3px;
+}
+
+h3 {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text-bright);
+  margin: 32px 0 12px;
+}
+
+h4 {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--amber);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin: 24px 0 8px;
+}
+
+p {
+  margin-bottom: 16px;
+  color: var(--text);
+}
+
+p a, .content a {
+  color: var(--accent);
+  text-decoration: none;
+  border-bottom: 1px solid transparent;
+  transition: border-color 0.2s;
+}
+p a:hover, .content a:hover {
+  border-bottom-color: var(--accent);
+}
+
+strong { color: var(--text-bright); font-weight: 600; }
+
+ul, ol {
+  margin: 0 0 16px 20px;
+  color: var(--text);
+}
+li { margin-bottom: 6px; }
+
+/* ─── DIAGRAM ─── */
+.diagram {
+  background: var(--bg-code);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 32px;
+  margin: 24px 0;
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-x: auto;
+  white-space: pre;
+  color: var(--text-muted);
+}
+.diagram .hl { color: var(--accent); }
+.diagram .gr { color: var(--green); }
+.diagram .am { color: var(--amber); }
+.diagram .pk { color: var(--pink); }
+
+/* ─── CODE ─── */
+pre {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 20px 24px;
+  margin: 16px 0 24px;
+  overflow-x: auto;
+  font-size: 13px;
+  line-height: 1.7;
+  position: relative;
+}
+
+pre .label {
+  position: absolute;
+  top: 8px;
+  right: 12px;
+  font-size: 10px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  user-select: none;
+}
+
+code {
+  font-family: var(--mono);
+}
+
+:not(pre) > code {
+  background: var(--bg-code);
+  border: 1px solid var(--border);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+  color: var(--pink);
+}
+
+.c-kw { color: #c792ea; }
+.c-str { color: var(--green); }
+.c-cmt { color: #8a9db0; font-style: italic; }
+.c-fn { color: #82aaff; }
+.c-val { color: var(--amber); }
+
+/* ─── CALLOUTS ─── */
+.callout {
+  border-radius: 8px;
+  padding: 16px 20px;
+  margin: 20px 0;
+  font-size: 13px;
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.callout-icon {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 700;
+  margin-top: 1px;
+}
+
+.callout.warning {
+  background: rgba(251, 191, 36, 0.06);
+  border: 1px solid rgba(251, 191, 36, 0.2);
+  color: var(--amber);
+}
+.callout.warning .callout-icon {
+  background: rgba(251, 191, 36, 0.15);
+  color: var(--amber);
+}
+
+.callout.info {
+  background: rgba(59, 130, 246, 0.06);
+  border: 1px solid rgba(59, 130, 246, 0.2);
+  color: var(--accent);
+}
+.callout.info .callout-icon {
+  background: rgba(59, 130, 246, 0.15);
+  color: var(--accent);
+}
+
+.callout.tip {
+  background: rgba(52, 211, 153, 0.06);
+  border: 1px solid rgba(52, 211, 153, 0.2);
+  color: var(--green);
+}
+.callout.tip .callout-icon {
+  background: rgba(52, 211, 153, 0.15);
+  color: var(--green);
+}
+
+/* ─── TABLES ─── */
+.table-wrap {
+  overflow-x: auto;
+  margin: 16px 0 24px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+thead {
+  background: var(--bg-code);
+}
+
+th {
+  text-align: left;
+  padding: 10px 16px;
+  font-weight: 600;
+  color: var(--text-muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  border-bottom: 1px solid var(--border);
+}
+
+td {
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+
+tr:last-child td { border-bottom: none; }
+tr:hover { background: rgba(255,255,255,0.01); }
+
+td:first-child code {
+  color: var(--accent);
+  background: var(--accent-glow);
+  border-color: rgba(59, 130, 246, 0.15);
+}
+
+td code {
+  font-size: 12px;
+}
+
+/* ─── PRESET CARDS ─── */
+.preset-cards {
+  display: grid;
+  gap: 16px;
+  margin: 20px 0;
+}
+
+.preset-card {
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 24px;
+  transition: border-color 0.2s;
+}
+
+.preset-card:hover {
+  border-color: var(--border-active);
+}
+
+.preset-card-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.preset-card-name {
+  font-weight: 700;
+  color: var(--text-bright);
+  font-size: 15px;
+}
+
+.preset-tag {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  font-weight: 600;
+}
+
+.preset-tag.default {
+  background: rgba(52, 211, 153, 0.1);
+  color: var(--green);
+  border: 1px solid rgba(52, 211, 153, 0.2);
+}
+
+.preset-tag.deprecated {
+  background: rgba(248, 113, 113, 0.1);
+  color: var(--red);
+  border: 1px solid rgba(248, 113, 113, 0.2);
+}
+
+.preset-card-desc {
+  color: var(--text-muted);
+  font-size: 13px;
+  line-height: 1.7;
+}
+
+/* ─── STEPS ─── */
+.steps {
+  counter-reset: step;
+  margin: 24px 0;
+}
+
+.step {
+  counter-increment: step;
+  position: relative;
+  padding-left: 48px;
+  padding-bottom: 32px;
+  border-left: 1px solid var(--border);
+  margin-left: 15px;
+}
+
+.step:last-child { border-left-color: transparent; padding-bottom: 0; }
+
+.step::before {
+  content: counter(step);
+  position: absolute;
+  left: -16px;
+  top: 0;
+  width: 30px;
+  height: 30px;
+  background: var(--bg);
+  border: 2px solid var(--accent);
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.step h3 {
+  margin-top: -2px;
+  margin-bottom: 8px;
+}
+
+/* ─── FOOTER ─── */
+footer {
+  margin-left: var(--sidebar-w);
+  border-top: 1px solid var(--border);
+  padding: 32px 48px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+footer a {
+  color: var(--text-muted);
+  text-decoration: none;
+}
+footer a:hover { color: var(--text); }
+
+/* ─── RESPONSIVE ─── */
+@media (max-width: 900px) {
+  .nav-toggle { display: block; }
+  .sidebar {
+    transform: translateX(-100%);
+    transition: transform 0.25s ease;
+  }
+  .sidebar.open { transform: translateX(0); }
+  main { margin-left: 0; }
+  footer { margin-left: 0; }
+  .content { padding: 32px 20px 64px; }
+  .hero h1 { font-size: 28px; }
+  .hero-stats { flex-wrap: wrap; gap: 20px; }
+  .header-links .desktop-only { display: none; }
+}
+</style>
+</head>
+<body>
+
+<!-- HEADER -->
+<header>
+  <div class="header-inner">
+    <a href="#" class="logo">
+      <span class="logo-text">fscache</span>
+      <span class="logo-version">v0.3.0</span>
+    </a>
+    <div class="header-links">
+      <a href="#quick-start" class="desktop-only">Quick Start</a>
+      <a href="#settings" class="desktop-only">Settings</a>
+      <a href="https://github.com/DudeCmonMan/fscache/releases" class="desktop-only" target="_blank" rel="noopener">Releases</a>
+      <a href="https://github.com/DudeCmonMan/fscache" class="gh-pill desktop-only" target="_blank" rel="noopener">
+        <svg viewBox="0 0 16 16"><path d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.751.751 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25Z"/></svg>
+        Star
+      </a>
+      <a href="https://github.com/DudeCmonMan" class="gh-pill desktop-only" target="_blank" rel="noopener">
+        <svg viewBox="0 0 16 16"><path d="M6 8a3 3 0 1 0 0-6 3 3 0 0 0 0 6Zm2-3a2 2 0 1 1-4 0 2 2 0 0 1 4 0Zm4 8c0 1-1 1-1 1H1s-1 0-1-1 1-4 6-4 6 3 6 4Zm-1-.004c-.001-.246-.154-.986-.832-1.664C9.516 10.68 8.289 10 6 10s-3.516.68-4.168 1.332c-.678.678-.83 1.418-.832 1.664h10Z"/><path d="M13.5 5a.5.5 0 0 1 .5.5V7h1.5a.5.5 0 0 1 0 1H14v1.5a.5.5 0 0 1-1 0V8h-1.5a.5.5 0 0 1 0-1H13V5.5a.5.5 0 0 1 .5-.5Z"/></svg>
+        Follow
+      </a>
+      <a href="https://github.com/DudeCmonMan/fscache" class="gh-btn" target="_blank" rel="noopener">
+        <svg viewBox="0 0 16 16"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+        GitHub
+      </a>
+      <button class="nav-toggle" onclick="document.querySelector('.sidebar').classList.toggle('open')" aria-label="Toggle navigation">☰</button>
+    </div>
+  </div>
+</header>
+
+<!-- SIDEBAR -->
+<nav class="sidebar" id="sidebar">
+  <div class="nav-section">
+    <div class="nav-section-title">Getting Started</div>
+    <a href="#overview" class="nav-link"><span class="dot"></span> Overview</a>
+    <a href="#how-it-works" class="nav-link"><span class="dot"></span> How It Works</a>
+    <a href="#quick-start" class="nav-link"><span class="dot"></span> Quick Start</a>
+    <a href="#systemd" class="nav-link"><span class="dot"></span> systemd Service</a>
+    <a href="#docker" class="nav-link"><span class="dot"></span> Docker</a>
+    <a href="#building" class="nav-link"><span class="dot"></span> Building from Source</a>
+  </div>
+  <div class="nav-section">
+    <div class="nav-section-title">Configuration</div>
+    <a href="#presets" class="nav-link"><span class="dot"></span> Presets</a>
+    <a href="#settings" class="nav-link"><span class="dot"></span> Settings Reference</a>
+    <a href="#example-config" class="nav-link"><span class="dot"></span> Example Configs</a>
+  </div>
+  <div class="nav-section">
+    <div class="nav-section-title">Reference</div>
+    <a href="#monitor" class="nav-link"><span class="dot"></span> Monitor GUI</a>
+    <a href="#principles" class="nav-link"><span class="dot"></span> Design Principles</a>
+    <a href="#safety" class="nav-link"><span class="dot"></span> Safety Warning</a>
+  </div>
+</nav>
+
+<!-- MAIN CONTENT -->
+<main>
+<div class="content">
+
+  <!-- HERO -->
+  <div class="hero" id="overview">
+    <div class="hero-badge">Open Source · GPL-3.0</div>
+    <h1>Transparent SSD caching<br>for <em>any</em> read-heavy workload</h1>
+    <p class="hero-desc">
+      fscache sits between your application and slow storage by mounting directly over your existing directories using FUSE. Files are silently pre-copied to local SSD before they're needed. No plugins, no API wrappers, no config changes on the application side.
+    </p>
+    <div class="hero-stats">
+      <div class="hero-stat">
+        <span class="hero-stat-value">Rust</span>
+        <span class="hero-stat-label">Language</span>
+      </div>
+      <div class="hero-stat">
+        <span class="hero-stat-value">2</span>
+        <span class="hero-stat-label">Presets</span>
+      </div>
+      <div class="hero-stat">
+        <span class="hero-stat-value">v0.3.0</span>
+        <span class="hero-stat-label">Latest Release</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- HOW IT WORKS -->
+  <div class="section">
+    <span class="section-anchor" id="how-it-works"></span>
+    <h2>How It Works</h2>
+    <p>
+      fscache mounts a read-only FUSE filesystem <strong>directly over</strong> your existing media directory. Your application keeps reading from the same path it always has — no changes needed. When a file is opened, FUSE intercepts the request and serves it from SSD cache if available, falling back to the original backing store transparently.
+    </p>
+    <p>
+      In the background, a preset-driven action engine watches which files are being opened and decides what else to cache — the next N episodes, neighboring files, or an entire directory tree, depending on how you configure it.
+    </p>
+
+    <div class="diagram" style="padding: 24px; white-space: normal;">
+      <svg width="100%" viewBox="0 0 680 300" role="img" xmlns="http://www.w3.org/2000/svg">
+        <title>fscache architecture flow</title>
+        <desc>Application reads go through the FUSE layer, served from SSD cache on hit, or routed through the caching layer to the backing store on miss.</desc>
+        <defs>
+          <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+            <path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          </marker>
+          <mask id="imagine-text-gaps-cl38l0" maskUnits="userSpaceOnUse"><rect x="0" y="0" width="680" height="300" fill="white"/><rect x="224.6728515625" y="7.721975326538086" width="172.3109130859375" height="19.111416816711426" fill="black" rx="2"/><rect x="56.91421127319336" y="115.02760314941406" width="36.389808654785156" height="21.944807052612305" fill="black" rx="2"/><rect x="31.096412658691406" y="133.4442901611328" width="87.46662902832031" height="19.111416816711426" fill="black" rx="2"/><rect x="181.31698608398438" y="115.02760314941406" width="80.22186279296875" height="21.944807052612305" fill="black" rx="2"/><rect x="170.4335174560547" y="133.4442901611328" width="102.51705932617188" height="19.111416816711426" fill="black" rx="2"/><rect x="320.43475341796875" y="43.72197341918945" width="151.73121643066406" height="19.111416816711426" fill="black" rx="2"/><rect x="264" y="173.7219696044922" width="35.184974670410156" height="19.111416816711426" fill="black" rx="2"/><rect x="507.0218200683594" y="52.0275993347168" width="79.31806945800781" height="21.944807052612305" fill="black" rx="2"/><rect x="515.2637329101562" y="70.44429016113281" width="64.22451782226562" height="19.111416816711426" fill="black" rx="2"/><rect x="359.2703552246094" y="143.02760314941406" width="54.830440521240234" height="21.944807052612305" fill="black" rx="2"/><rect x="337.8723449707031" y="202.02760314941406" width="99.10372161865234" height="21.944807052612305" fill="black" rx="2"/><rect x="350.06182861328125" y="220.4442901611328" width="74.80937957763672" height="19.111416816711426" fill="black" rx="2"/><rect x="497.61407470703125" y="202.02760314941406" width="99.08210754394531" height="21.944807052612305" fill="black" rx="2"/><rect x="511.50067138671875" y="220.4442901611328" width="72.65321350097656" height="19.111416816711426" fill="black" rx="2"/><rect x="254.6728515625" y="269.72198486328125" width="172.3109130859375" height="19.111416816711426" fill="black" rx="2"/></mask>
+        </defs>
+
+        <!-- Return: SSD → Plex -->
+        <path d="M547 45 Q547 28 533 28 L89 28 Q75 28 75 42 L75 108" fill="none" stroke="#1D9E75" stroke-width="1" marker-end="url(#arrow)"/>
+        <text x="310" y="22" text-anchor="middle" fill="#C2C0B6" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="12">File delivered directly to Plex</text>
+
+        <!-- Col 1: Plex -->
+        <g>
+          <rect x="20" y="108" width="110" height="50" rx="8" fill="#3C3489" stroke="#AFA9EC" stroke-width="0.5"/>
+          <text x="75" y="126" text-anchor="middle" dominant-baseline="central" fill="#CECBF6" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="14" font-weight="500">Plex</text>
+          <text x="75" y="143" text-anchor="middle" dominant-baseline="central" fill="#AFA9EC" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="12">Client service</text>
+        </g>
+
+        <!-- Arrow Plex → FUSE -->
+        <line x1="130" y1="133" x2="164" y2="133" stroke="#9C9A92" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+        <!-- Col 2: FUSE -->
+        <g>
+          <rect x="166" y="108" width="110" height="50" rx="8" fill="#085041" stroke="#5DCAA5" stroke-width="0.5"/>
+          <text x="221" y="126" text-anchor="middle" dominant-baseline="central" fill="#9FE1CB" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="14" font-weight="500">FUSE layer</text>
+          <text x="221" y="143" text-anchor="middle" dominant-baseline="central" fill="#5DCAA5" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="12">Intercepts reads</text>
+        </g>
+
+        <!-- Arrow: FUSE → SSD (hit) -->
+        <path d="M276 120 L296 120 Q310 120 310 106 L310 84 Q310 70 324 70 L490 70" fill="none" stroke="#9C9A92" stroke-width="1.5" marker-end="url(#arrow)"/>
+        <text x="396" y="58" text-anchor="middle" fill="#C2C0B6" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="12">hit — path exists in cache</text>
+
+        <!-- Arrow: FUSE → Caching Layer (miss) -->
+        <path d="M276 146 L296 146 Q310 146 310 160 L310 206 Q310 220 324 220 L330 220" fill="none" stroke="#9C9A92" stroke-width="1.5" marker-end="url(#arrow)"/>
+        <text x="268" y="188" text-anchor="start" fill="#C2C0B6" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="12">miss</text>
+
+        <!-- SSD Cache -->
+        <g>
+          <rect x="492" y="45" width="110" height="50" rx="8" fill="#085041" stroke="#5DCAA5" stroke-width="0.5"/>
+          <text x="547" y="63" text-anchor="middle" dominant-baseline="central" fill="#9FE1CB" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="14" font-weight="500">SSD cache</text>
+          <text x="547" y="80" text-anchor="middle" dominant-baseline="central" fill="#5DCAA5" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="12">Fast, local</text>
+        </g>
+
+        <!-- SQLite -->
+        <g>
+          <rect x="342" y="132" width="90" height="44" rx="8" fill="#444441" stroke="#B4B2A9" stroke-width="0.5"/>
+          <text x="387" y="154" text-anchor="middle" dominant-baseline="central" fill="#D3D1C7" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="14" font-weight="500">SQLite</text>
+        </g>
+
+        <!-- Caching Layer -->
+        <g>
+          <rect x="332" y="195" width="110" height="50" rx="8" fill="#633806" stroke="#EF9F27" stroke-width="0.5"/>
+          <text x="387" y="213" text-anchor="middle" dominant-baseline="central" fill="#FAC775" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="14" font-weight="500">Caching layer</text>
+          <text x="387" y="230" text-anchor="middle" dominant-baseline="central" fill="#EF9F27" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="12">Preset logic</text>
+        </g>
+
+        <!-- Caching ↔ SQLite -->
+        <line x1="380" y1="195" x2="380" y2="178" stroke="#9C9A92" stroke-width="1.5" marker-end="url(#arrow)"/>
+        <line x1="394" y1="178" x2="394" y2="195" stroke="#9C9A92" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+        <!-- Arrow: Caching → Backing Store -->
+        <line x1="442" y1="220" x2="490" y2="220" stroke="#9C9A92" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+        <!-- Backing Store -->
+        <g>
+          <rect x="492" y="195" width="110" height="50" rx="8" fill="#712B13" stroke="#F0997B" stroke-width="0.5"/>
+          <text x="547" y="213" text-anchor="middle" dominant-baseline="central" fill="#F5C4B3" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="14" font-weight="500">Backing store</text>
+          <text x="547" y="230" text-anchor="middle" dominant-baseline="central" fill="#F0997B" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="12">NAS / array</text>
+        </g>
+
+        <!-- Return: Backing Store → Plex -->
+        <path d="M602 220 Q620 220 620 234 L620 274 Q620 288 606 288 L89 288 Q75 288 75 274 L75 158" fill="none" stroke="#D85A30" stroke-width="1" marker-end="url(#arrow)" mask="url(#imagine-text-gaps-cl38l0)"/>
+        <text x="340" y="284" text-anchor="middle" fill="#C2C0B6" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="12">File delivered directly to Plex</text>
+      </svg>
+    </div>
+
+    <p>
+      On shutdown, the FUSE mount is lazily detached — any streams already in progress continue uninterrupted from their open file descriptors.
+    </p>
+  </div>
+
+  <!-- QUICK START -->
+  <div class="section">
+    <span class="section-anchor" id="quick-start"></span>
+    <h2>Quick Start</h2>
+    <div class="steps">
+
+      <div class="step">
+        <h3>Download and Extract</h3>
+        <p>Grab the latest release from the <a href="https://github.com/DudeCmonMan/fscache/releases" target="_blank">Releases page</a> and extract it:</p>
+        <pre><code>tar -xzf fscache-*.tar.gz -C /opt/fscache</code><span class="label">bash</span></pre>
+        <p>The release includes the binary, a default <code>config.toml</code>, and the LICENSE.</p>
+      </div>
+
+      <div class="step">
+        <h3>Configure</h3>
+        <p>Edit <code>config.toml</code> in the same directory as the binary. At minimum, set three values:</p>
+        <pre><code><span class="c-cmt"># config.toml</span>
+<span class="c-kw">[paths]</span>
+<span class="c-fn">target_directories</span> = [<span class="c-str">"/mnt/media"</span>]     <span class="c-cmt"># directories to mount over</span>
+<span class="c-fn">cache_directory</span>    = <span class="c-str">"/mnt/ssd-cache"</span>   <span class="c-cmt"># SSD path for cached files</span>
+<span class="c-fn">instance_name</span>      = <span class="c-str">"my-media"</span>         <span class="c-cmt"># unique name for this instance</span></code><span class="label">toml</span></pre>
+      </div>
+
+      <div class="step">
+        <h3>Allow FUSE Access</h3>
+        <p>If your media server runs as a different user, enable FUSE access:</p>
+        <pre><code>echo <span class="c-str">"user_allow_other"</span> | sudo tee -a /etc/fuse.conf</code><span class="label">bash</span></pre>
+      </div>
+
+      <div class="step">
+        <h3>Run</h3>
+        <p>Start fscache. That's it — the cache is active and the filesystem doesn't need any changes.</p>
+        <pre><code>cd /opt/fscache
+sudo ./fscache</code><span class="label">bash</span></pre>
+        <div class="callout info">
+          <div class="callout-icon">i</div>
+          <div>Stop with <code>Ctrl+C</code> — the mount detaches cleanly. Do <strong>not</strong> double-tap Ctrl+C; let it finish gracefully.</div>
+        </div>
+        <div class="callout tip">
+          <div class="callout-icon">✓</div>
+          <div>To monitor cache activity in real time, run <code>./fscache watch</code> in a separate terminal.</div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- SYSTEMD -->
+  <div class="section">
+    <span class="section-anchor" id="systemd"></span>
+    <h2>Running with systemd</h2>
+    <p>For a persistent setup that starts on boot:</p>
+    <pre><code>sudo cp fscache.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now fscache</code><span class="label">bash</span></pre>
+    <p>Verify it's running:</p>
+    <pre><code>systemctl status fscache
+mount | grep fscache</code><span class="label">bash</span></pre>
+    <div class="callout tip">
+      <div class="callout-icon">✓</div>
+      <div>If your media is on a network share, edit the unit to wait for the mount — see the comments inside <code>fscache.service</code>.</div>
+    </div>
+  </div>
+
+  <!-- DOCKER -->
+  <div class="section">
+    <span class="section-anchor" id="docker"></span>
+    <h2>Docker</h2>
+    <p>A dedicated Docker image and setup guide are available for containerised deployments.</p>
+    <div class="callout info">
+      <div class="callout-icon">i</div>
+      <div>See the <a href="https://github.com/DudeCmonMan/fscache/blob/main/docker/README.md" target="_blank" rel="noopener" style="color: var(--text-bright); text-decoration: underline; font-weight: 600;">Docker README</a> for image usage, environment variable configuration, and compose examples. Feedback welcome — Docker support is actively maintained but less battle-tested than the bare-metal path.</div>
+    </div>
+  </div>
+
+  <!-- BUILDING -->
+  <div class="section">
+    <span class="section-anchor" id="building"></span>
+    <h2>Building from Source</h2>
+    <pre><code>cargo build --release
+sudo cp target/release/fscache /usr/local/bin/</code><span class="label">bash</span></pre>
+  </div>
+
+  <!-- PRESETS -->
+  <div class="section">
+    <span class="section-anchor" id="presets"></span>
+    <h2>Presets</h2>
+    <p>Behavior is controlled by a <strong>preset</strong> — a pluggable strategy for deciding what to cache and when. Set via <code>[preset] name</code> in <code>config.toml</code>.</p>
+
+    <div class="preset-cards">
+
+      <div class="preset-card">
+        <div class="preset-card-header">
+          <span class="preset-card-name">plex-episode-prediction</span>
+          <span class="preset-tag default">default</span>
+        </div>
+        <p class="preset-card-desc">
+          Episode lookahead tailored for Plex. Pre-caches the next N episodes after any file open. Intelligently filters out Plex's background analysis processes (Media Scanner, EAE Service, Fingerprinter, intro/credit detection transcoders) so only real user playback drives the prediction.
+        </p>
+        <h4>Modes</h4>
+        <ul>
+          <li><code>miss-only</code> — predict and cache ahead only on a cache miss</li>
+          <li><code>rolling-buffer</code> — keep the next N episodes loaded at all times, re-predicting on every access</li>
+        </ul>
+      </div>
+
+      <div class="preset-card">
+        <div class="preset-card-header">
+          <span class="preset-card-name">prefetch</span>
+        </div>
+        <p class="preset-card-desc">
+          General-purpose preset with three caching modes and optional regex filtering. Not Plex-specific — works for any file workload. All regex patterns are compiled at startup; invalid patterns cause the daemon to refuse to start — no silent failures at runtime.
+        </p>
+        <h4>Modes</h4>
+        <ul>
+          <li><code>cache-hit-only</code> — cache only the file that was accessed. Safest, no fan-out.</li>
+          <li><code>cache-neighbors</code> — cache all sibling files in the same directory.</li>
+          <li><code>cache-parent-recursively</code> — recursively cache the entire parent directory up to <code>max_depth</code> levels deep.</li>
+        </ul>
+        <h4>Filtering</h4>
+        <ul>
+          <li><code>file_whitelist</code> — regex patterns, only matching files are cached</li>
+          <li><code>file_blacklist</code> — regex patterns, matching files are never cached (checked first)</li>
+          <li><code>process_blocklist</code> — process names that must never trigger caching</li>
+        </ul>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- SETTINGS -->
+  <div class="section">
+    <span class="section-anchor" id="settings"></span>
+    <h2>Settings Reference</h2>
+
+    <h3>Required</h3>
+    <div class="table-wrap">
+    <table>
+      <thead><tr><th>Setting</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>paths.target_directories</code></td><td>List of directories to mount over using FUSE</td></tr>
+        <tr><td><code>paths.cache_directory</code></td><td>SSD path where cached files are stored</td></tr>
+        <tr><td><code>paths.instance_name</code></td><td>Unique name for this instance (DB filename and process lock)</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <h3>Preset</h3>
+    <div class="table-wrap">
+    <table>
+      <thead><tr><th>Setting</th><th>Default</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>preset.name</code></td><td><code>plex-episode-prediction</code></td><td>Active preset name</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <h3>Plex Episode Prediction</h3>
+    <div class="table-wrap">
+    <table>
+      <thead><tr><th>Setting</th><th>Default</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>plex.lookahead</code></td><td><code>4</code></td><td>Episodes to pre-cache ahead of current position</td></tr>
+        <tr><td><code>plex.mode</code></td><td><code>miss-only</code></td><td><code>miss-only</code> or <code>rolling-buffer</code></td></tr>
+        <tr><td><code>plex.process_blocklist</code></td><td><code>[]</code></td><td>Process names that must never trigger prediction</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <h3>Prefetch</h3>
+    <div class="table-wrap">
+    <table>
+      <thead><tr><th>Setting</th><th>Default</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>prefetch.mode</code></td><td><code>cache-hit-only</code></td><td><code>cache-hit-only</code>, <code>cache-neighbors</code>, or <code>cache-parent-recursively</code></td></tr>
+        <tr><td><code>prefetch.max_depth</code></td><td><code>3</code></td><td>Max recursion depth for <code>cache-parent-recursively</code></td></tr>
+        <tr><td><code>prefetch.process_blocklist</code></td><td><code>[]</code></td><td>Process names that must never trigger caching</td></tr>
+        <tr><td><code>prefetch.file_whitelist</code></td><td><code>[]</code></td><td>Regex patterns — only matching filenames cached (empty = allow all)</td></tr>
+        <tr><td><code>prefetch.file_blacklist</code></td><td><code>[]</code></td><td>Regex patterns — matching filenames never cached</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <h3>Eviction</h3>
+    <div class="table-wrap">
+    <table>
+      <thead><tr><th>Setting</th><th>Default</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>eviction.max_size_gb</code></td><td><code>200.0</code></td><td>Max total SSD cache size across all mounts</td></tr>
+        <tr><td><code>eviction.expiry_hours</code></td><td><code>72</code></td><td>Remove cached files not accessed within this window</td></tr>
+        <tr><td><code>eviction.min_free_space_gb</code></td><td><code>10.0</code></td><td>Stop caching if SSD free space drops below this</td></tr>
+        <tr><td><code>eviction.poll_interval_secs</code></td><td><code>300</code></td><td>How often the background maintenance task runs (seconds). Drives eviction sweeps and on-maintenance invalidation. Set <code>0</code> to disable.</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <h3>Invalidation</h3>
+    <p>Detects and discards cached files whose backing source has been rewritten (e.g. by rsync, re-encode, or a fresh download).</p>
+    <div class="table-wrap">
+    <table>
+      <thead><tr><th>Setting</th><th>Default</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>invalidation.check_on_hit</code></td><td><code>false</code></td><td>Revalidate against the backing file on every FUSE cache hit. Adds one <code>stat()</code> per hit — negligible on local storage, may be noticeable on SMB/NFS at scale. Detects staleness in real time.</td></tr>
+        <tr><td><code>invalidation.check_on_maintenance</code></td><td><code>true</code></td><td>Revalidate during the periodic maintenance sweep. Catches idle files overwritten on the backing store since they were cached. Detection latency ≤ <code>eviction.poll_interval_secs</code>.</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <h3>Cache</h3>
+    <div class="table-wrap">
+    <table>
+      <thead><tr><th>Setting</th><th>Default</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>cache.passthrough_mode</code></td><td><code>false</code></td><td>Bypass cache entirely — useful for debugging</td></tr>
+        <tr><td><code>cache.max_cache_pull_per_mount_gb</code></td><td><code>0.0</code></td><td>Cap per-mount lookahead pull per session (0 = unlimited)</td></tr>
+        <tr><td><code>cache.deferred_ttl_minutes</code></td><td><code>1440</code></td><td>Discard buffered events older than this on startup</td></tr>
+        <tr><td><code>cache.min_access_secs</code></td><td><code>0</code></td><td>Minimum seconds a file must stay open before prediction triggers</td></tr>
+        <tr><td><code>cache.min_file_size_mb</code></td><td><code>0</code></td><td>Skip files below this size — filters metadata/subtitle noise</td></tr>
+      </tbody>
+    </table>
+    </div>
+
+    <h3>Schedule</h3>
+    <div class="table-wrap">
+    <table>
+      <thead><tr><th>Setting</th><th>Default</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>schedule.cache_window_start</code></td><td><code>08:00</code></td><td>Start of allowed caching window (HH:MM, 24h)</td></tr>
+        <tr><td><code>schedule.cache_window_end</code></td><td><code>02:00</code></td><td>End of allowed caching window (wraps past midnight)</td></tr>
+      </tbody>
+    </table>
+    </div>
+    <p>Accesses outside the window are buffered and flushed when the window re-opens.</p>
+
+    <h3>Logging</h3>
+    <div class="table-wrap">
+    <table>
+      <thead><tr><th>Setting</th><th>Default</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>logging.log_directory</code></td><td><code>/var/log/fscache</code></td><td>Directory for rolling daily log files</td></tr>
+        <tr><td><code>logging.console_level</code></td><td><code>info</code></td><td>Terminal log level</td></tr>
+        <tr><td><code>logging.file_level</code></td><td><code>debug</code></td><td>Log file level</td></tr>
+        <tr><td><code>logging.repeat_log_window_secs</code></td><td><code>300</code></td><td>Suppress repeated access logs for same file within this window</td></tr>
+      </tbody>
+    </table>
+    </div>
+  </div>
+
+  <!-- EXAMPLE CONFIG -->
+  <div class="section">
+    <span class="section-anchor" id="example-config"></span>
+    <h2>Example Configs</h2>
+
+    <h3>Plex (default preset)</h3>
+    <pre><code><span class="c-kw">[paths]</span>
+<span class="c-fn">target_directories</span> = [<span class="c-str">"/mnt/media"</span>, <span class="c-str">"/mnt/media2"</span>]
+<span class="c-fn">cache_directory</span>    = <span class="c-str">"/mnt/ssd-cache"</span>
+<span class="c-fn">instance_name</span>      = <span class="c-str">"plex-movies"</span>
+
+<span class="c-kw">[preset]</span>
+<span class="c-fn">name</span> = <span class="c-str">"plex-episode-prediction"</span>
+
+<span class="c-kw">[plex]</span>
+<span class="c-fn">lookahead</span>         = <span class="c-val">4</span>
+<span class="c-fn">mode</span>              = <span class="c-str">"miss-only"</span>
+<span class="c-fn">process_blocklist</span> = [<span class="c-str">"Plex Media Scanner"</span>, <span class="c-str">"Plex EAE Service"</span>, <span class="c-str">"Plex Media Fingerprinter"</span>]
+
+<span class="c-kw">[eviction]</span>
+<span class="c-fn">max_size_gb</span>        = <span class="c-val">200.0</span>
+<span class="c-fn">expiry_hours</span>       = <span class="c-val">72</span>
+<span class="c-fn">min_free_space_gb</span>  = <span class="c-val">10.0</span>
+<span class="c-fn">poll_interval_secs</span> = <span class="c-val">300</span>
+
+<span class="c-kw">[invalidation]</span>
+<span class="c-fn">check_on_hit</span>         = <span class="c-val">false</span>
+<span class="c-fn">check_on_maintenance</span> = <span class="c-val">true</span>
+
+<span class="c-kw">[cache]</span>
+<span class="c-fn">passthrough_mode</span>            = <span class="c-val">false</span>
+<span class="c-fn">max_cache_pull_per_mount_gb</span> = <span class="c-val">0.0</span>
+<span class="c-fn">min_access_secs</span>             = <span class="c-val">0</span>
+<span class="c-fn">min_file_size_mb</span>            = <span class="c-val">0</span>
+
+<span class="c-kw">[schedule]</span>
+<span class="c-fn">cache_window_start</span> = <span class="c-str">"08:00"</span>
+<span class="c-fn">cache_window_end</span>   = <span class="c-str">"02:00"</span>
+
+<span class="c-kw">[logging]</span>
+<span class="c-fn">log_directory</span>          = <span class="c-str">"/var/log/fscache"</span>
+<span class="c-fn">console_level</span>          = <span class="c-str">"info"</span>
+<span class="c-fn">file_level</span>             = <span class="c-str">"debug"</span>
+<span class="c-fn">repeat_log_window_secs</span> = <span class="c-val">300</span></code><span class="label">toml</span></pre>
+
+    <h3>Prefetch (generic workload)</h3>
+    <pre><code><span class="c-kw">[preset]</span>
+<span class="c-fn">name</span> = <span class="c-str">"prefetch"</span>
+
+<span class="c-kw">[prefetch]</span>
+<span class="c-fn">mode</span>           = <span class="c-str">"cache-neighbors"</span>
+<span class="c-fn">max_depth</span>      = <span class="c-val">3</span>
+<span class="c-fn">file_blacklist</span> = [<span class="c-str">"\\.nfo$"</span>, <span class="c-str">"\\.jpg$"</span>]
+<span class="c-cmt"># file_whitelist  = ["\\.mkv$", "\\.mp4$"]</span></code><span class="label">toml</span></pre>
+  </div>
+
+  <!-- MONITOR -->
+  <div class="section">
+    <span class="section-anchor" id="monitor"></span>
+    <h2>Monitor GUI</h2>
+    <p>
+      fscache ships with a built-in monitoring interface. Launch it with:
+    </p>
+    <pre><code>./fscache watch</code><span class="label">bash</span></pre>
+    <p>
+      The monitor displays real-time cache activity, hit/miss ratios, and storage usage directly in your terminal.
+    </p>
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 16px;">
+      <img src="https://github.com/user-attachments/assets/993d9b19-d354-45a9-9961-7abf9d86cc44" alt="fscache monitor screenshot 1" style="width: 100%; border-radius: 8px; border: 1px solid var(--border);">
+      <img src="https://github.com/user-attachments/assets/c149cec9-6992-4323-91a8-fe4e80aeea74" alt="fscache monitor screenshot 2" style="width: 100%; border-radius: 8px; border: 1px solid var(--border);">
+    </div>
+  </div>
+
+  <!-- PRINCIPLES -->
+  <div class="section">
+    <span class="section-anchor" id="principles"></span>
+    <h2>Design Principles</h2>
+    <ul>
+      <li><strong>Launch at any time.</strong> The FUSE mount can go up or come down without restarting your application. Streams already in flight are not interrupted on shutdown.</li>
+      <li><strong>Graceful by default.</strong> Cache corruption, copy failures, and missing files are all handled without crashing — the worst case is a cache miss that falls back to the network share.</li>
+      <li><strong>Drop-in / drop-out.</strong> No modifications to your application or media library. Remove the service and your media directory is exactly as it was.</li>
+      <li><strong>Multiple mounts.</strong> Point fscache at multiple media directories simultaneously — each gets its own namespaced cache subdirectory.</li>
+    </ul>
+  </div>
+
+  <!-- SAFETY WARNING -->
+  <div class="section">
+    <span class="section-anchor" id="safety"></span>
+    <h2>Safety Warning</h2>
+    <div class="callout warning">
+      <div class="callout-icon">!</div>
+      <div>
+        <strong>Please read before trying.</strong> This is a new project. If you're using Plex, <strong>disable automatic trash emptying</strong> while evaluating this software. Filesystem mounting/unmounting is potentially dangerous on a live server. If Plex detects a drive went down and you have automatic trash cleanup enabled, it will delete your Plex metadata (not the files — just watch history, ratings, etc.). The codebase has extensive automated testing, but please be safe.
+      </div>
+    </div>
+  </div>
+
+  <!-- STAR CTA -->
+  <div class="section" style="text-align: center; padding: 48px 0 16px;">
+    <p style="font-size: 15px; color: var(--text-muted); margin-bottom: 16px;">If fscache helped you, a star goes a long way.</p>
+    <a href="https://github.com/DudeCmonMan/fscache" target="_blank" rel="noopener" style="display: inline-flex; align-items: center; gap: 8px; padding: 10px 20px; background: var(--bg-raised); border: 1px solid var(--border); border-radius: 8px; color: var(--text-bright); text-decoration: none; font-size: 14px; font-weight: 600; transition: border-color 0.2s;" onmouseover="this.style.borderColor='var(--text-muted)'" onmouseout="this.style.borderColor='var(--border)'">
+      <svg width="18" height="18" viewBox="0 0 16 16" fill="currentColor"><path d="M8 .25a.75.75 0 0 1 .673.418l1.882 3.815 4.21.612a.75.75 0 0 1 .416 1.279l-3.046 2.97.719 4.192a.751.751 0 0 1-1.088.791L8 12.347l-3.766 1.98a.75.75 0 0 1-1.088-.79l.72-4.194L.818 6.374a.75.75 0 0 1 .416-1.28l4.21-.611L7.327.668A.75.75 0 0 1 8 .25Z"/></svg>
+      Star on GitHub
+    </a>
+  </div>
+
+</div>
+</main>
+
+<footer>
+  <p>fscache is open source under the <a href="https://github.com/DudeCmonMan/fscache/blob/main/LICENSE" target="_blank">GPL-3.0 license</a>. Built by <a href="https://github.com/DudeCmonMan" target="_blank">DudeCmonMan</a>.</p>
+</footer>
+
+<!-- ACTIVE NAV HIGHLIGHT -->
+<script>
+(function() {
+  const links = document.querySelectorAll('.nav-link');
+  const sections = [];
+  links.forEach(link => {
+    const id = link.getAttribute('href').replace('#', '');
+    const el = document.getElementById(id);
+    if (el) sections.push({ id, el, link });
+  });
+
+  function update() {
+    let current = sections[0];
+    const offset = window.scrollY + 100;
+    for (const s of sections) {
+      if (s.el.getBoundingClientRect().top + window.scrollY <= offset) {
+        current = s;
+      }
+    }
+    links.forEach(l => l.classList.remove('active'));
+    if (current) current.link.classList.add('active');
+  }
+
+  window.addEventListener('scroll', update, { passive: true });
+  update();
+
+  // Close mobile nav on link click
+  links.forEach(link => {
+    link.addEventListener('click', () => {
+      document.getElementById('sidebar').classList.remove('open');
+    });
+  });
+})();
+</script>
+
+</body>
+</html>

@@ -2,7 +2,7 @@
 
 tl;dr: Transparent, user-configurable SSD cache for slow storage (NAS/HDD) using FUSE — no application changes required. Caches hot files locally and serves future reads from SSD.
 
-Transparent SSD caching for any read-heavy file workload — media servers, NAS-backed applications, anything that reads from slow storage. Sits between your application and a network share / drive array using a FUSE overmount — your application sees no difference, but files are silently pre-copied to local SSD before they're needed.
+Transparent SSD caching for any read-heavy file workload — media servers, NAS-backed applications, anything that reads from slow storage. Sits between your application and a network share / drive array by mounting directly over your existing directories using FUSE — your application sees no difference, but files are silently pre-copied to local SSD before they're needed.
 
 No plugins, no API wrappers, no config changes on the application side. Drop it in, point it at your media directory, and remove it just as easily. As long as it receives a proper signal, you can stop it while your server is running. Active streams will need to be restarted, but your server won't.
 
@@ -41,15 +41,7 @@ fscache mounts a read-only FUSE filesystem **directly over** the existing filesy
 
 In the background, a preset-driven action engine watches which files are being opened and decides what else to cache — the next N episodes, neighboring files, or an entire directory tree, depending on how you configure it.
 
-```
-Application (Plex, Jellyfin, etc.)
-       │
-       ▼
-  /mnt/media ← FUSE overmount (fscache)
-       │
-       ├─ cache hit  → /mnt/ssd-cache/...    (fast, local SSD)
-       └─ cache miss → /mnt/nas/media/...    (slow, network share / drive array)
-```
+![fscache architecture diagram](docs/pages/fscache_flowchart_v030.svg)
 
 On shutdown, the FUSE mount is lazily detached — any streams already in progress continue uninterrupted from their open file descriptors.
 
@@ -96,7 +88,7 @@ Set the preset via `[preset] name` in `config.toml`.
 
 ## Principles
 
-- **Launch at any time.** The FUSE mount can go up or come down without restarting Plex. Streams already in flight are not interrupted on shutdown.
+- **Launch at any time.** The FUSE mount can go up or come down without restarting your application. Streams already in flight are not interrupted on shutdown.
 - **Graceful by default.** Cache corruption, copy failures, and missing files are all handled without crashing — the worst case is a cache miss that falls back to the network share.
 - **Drop-in / drop-out.** No modifications to Plex or your media library. Remove the service and your media directory is exactly as it was.
 - **Multiple mounts.** Point fscache at multiple media directories simultaneously — each gets its own namespaced cache subdirectory.
@@ -121,7 +113,7 @@ Edit `config.toml` in the same directory as the binary. At minimum, set three va
 
 ```toml
 [paths]
-target_directories = ["/mnt/media"]   # directories to overmount (can list multiple)
+target_directories = ["/mnt/media"]   # directories to mount over (can list multiple)
 cache_directory    = "/mnt/ssd-cache" # SSD path for cached files
 instance_name      = "my-media"       # unique name for this instance (used for DB and process lock)
 ```
@@ -185,7 +177,7 @@ sudo cp target/release/fscache /usr/local/bin/
 
 | Setting | Description |
 |---|---|
-| `paths.target_directories` | List of media directories Plex reads from (each will be FUSE overmounted) |
+| `paths.target_directories` | List of directories to mount over using FUSE (each will be transparently intercepted) |
 | `paths.cache_directory` | SSD path where cached files are stored |
 | `paths.instance_name` | Unique name for this instance — used for DB filename and process lock |
 

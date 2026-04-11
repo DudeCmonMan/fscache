@@ -1,0 +1,87 @@
+name: Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/pages/**'
+      - 'Cargo.toml'
+      - '.github/workflows/pages.yml'
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve sync values
+        id: sync
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          PROJECT_NAME="${{ github.event.repository.name }}"
+          VERSION="$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')"
+          REPO_URL="${{ github.server_url }}/${{ github.repository }}"
+          OWNER_URL="${{ github.server_url }}/${{ github.repository_owner }}"
+          LATEST_RELEASE="$(gh release view --json tagName --jq .tagName 2>/dev/null || echo "v${VERSION}")"
+          {
+            echo "project_name=${PROJECT_NAME}"
+            echo "version=${VERSION}"
+            echo "repo_url=${REPO_URL}"
+            echo "owner_url=${OWNER_URL}"
+            echo "latest_release=${LATEST_RELEASE}"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Patch index.html (in runner only)
+        run: |
+          set -euo pipefail
+          F=docs/pages/index.html
+          PROJECT_NAME='${{ steps.sync.outputs.project_name }}'
+          VERSION='${{ steps.sync.outputs.version }}'
+          REPO_URL='${{ steps.sync.outputs.repo_url }}'
+          OWNER_URL='${{ steps.sync.outputs.owner_url }}'
+
+          # 1. Repo URLs: rewrite any github.com/<owner>/<repo> prefix.
+          #    Subpaths like /releases or /blob/main/LICENSE are preserved.
+          sed -i -E "s|https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+|${REPO_URL}|g" "$F"
+
+          # 2. Owner-only URLs: rewrite https://github.com/<owner> when the
+          #    next char is a quote or angle bracket (not a repo URL).
+          sed -i -E "s|https://github\.com/[A-Za-z0-9_.-]+([\"'<])|${OWNER_URL}\1|g" "$F"
+
+          # 3. Version: replace bare semver strings (v<n>.<n>.<n>).
+          sed -i -E "s|v[0-9]+\.[0-9]+\.[0-9]+|v${VERSION}|g" "$F"
+
+          # 4. Project name: word-boundary replace.
+          sed -i -E "s|\\bfscache\\b|${PROJECT_NAME}|g" "$F"
+
+          echo "Resolved: name=${PROJECT_NAME} version=${VERSION}"
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: docs/pages
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

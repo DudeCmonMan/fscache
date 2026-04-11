@@ -19,8 +19,6 @@ Run fscache alongside Plex (or any media server) as a Docker sidecar container. 
 
 ## Quick Start
 
-Paste the fscache service into your existing `docker-compose.yml`, then make the edits described below.
-
 ### 1. Add the fscache service
 
 ```yaml
@@ -33,10 +31,13 @@ services:
     devices: ["/dev/fuse:/dev/fuse"]
     security_opt: ["apparmor:unconfined"]
     pid: host
+    environment:
+      FSCACHE_MAX_SIZE_GB: "200"     # total cache budget in GB
+      FSCACHE_EXPIRY_HOURS: "72"     # evict files not accessed within this window
     volumes:
-      - /mnt/media:/media:rshared                  # <-- Your media path
-      - /ssd/fscache/cache:/cache                  # <-- Your SSD cache path
-      - /ssd/fscache/state:/var/lib/fscache        # <-- Keep alongside cache dir
+      - /mnt/media:/media:rshared           # <-- Your media path
+      - /ssd/fscache/cache:/cache           # <-- Your SSD cache path
+      - /ssd/fscache/state:/var/lib/fscache # <-- Keep alongside cache dir
     healthcheck:
       test: ["CMD-SHELL", "grep -q fscache /proc/mounts"]
       interval: 5s
@@ -45,33 +46,28 @@ services:
       start_period: 10s
 ```
 
-**Edit the left side of the three volume lines** to match your system:
+Edit the left side of the three volume lines to match your system:
 
 | Volume | What to set the left side to |
 |---|---|
-| `/mnt/media:/media:rshared` | The host path where your media lives (your existing SMB/NFS/MergerFS mount) |
-| `/ssd/fscache/cache:/cache` | A fast local directory for cached files (SSD strongly recommended) |
+| `/mnt/media:/media:rshared` | Your media path (SMB/NFS/MergerFS mount, etc.) |
+| `/ssd/fscache/cache:/cache` | Fast local directory for cached files (SSD recommended) |
 | `/ssd/fscache/state:/var/lib/fscache` | Persistent state directory (keep it alongside the cache dir) |
 
-### 2. Update your existing Plex service
+> See [Example config](#example-config) for more env var options.
 
-Add `depends_on` so Plex waits for fscache's FUSE mount to be ready:
+### 2. Update your Plex service
+
+Add `depends_on` and switch the media volume to `:rslave`:
 
 ```yaml
   plex:
     depends_on:
       fscache:
         condition: service_healthy
-```
-
-Change your Plex media volume to use `:rslave` propagation:
-
-```yaml
     volumes:
-      - /mnt/media:/media:rslave
+      - /mnt/media:/media:rslave   # must be the exact same host path as fscache's first volume
 ```
-
-The **host path** (left side) must be the **exact same path** as fscache's first volume. This is how Plex picks up fscache's FUSE overlay.
 
 ### 3. Start the stack
 
@@ -79,6 +75,24 @@ The **host path** (left side) must be the **exact same path** as fscache's first
 docker compose up -d
 docker logs fscache    # confirm fscache mounted successfully
 ```
+
+## Example config
+
+A fuller `environment:` block covering the most common knobs:
+
+```yaml
+    environment:
+      FSCACHE_MAX_SIZE_GB: "200"          # total cache budget in GB
+      FSCACHE_EXPIRY_HOURS: "72"          # evict files not accessed within this window
+      FSCACHE_MIN_FREE_SPACE_GB: "10"     # always keep this much free on the cache volume
+      FSCACHE_PLEX_LOOKAHEAD: "4"         # episodes to prefetch ahead
+      FSCACHE_MIN_FILE_SIZE_MB: "0"       # skip files smaller than this (e.g. "5" ignores subtitles)
+      FSCACHE_CONSOLE_LEVEL: info         # debug / info / warn / error
+      FSCACHE_CACHE_WINDOW_START: "08:00"
+      FSCACHE_CACHE_WINDOW_END: "02:00"   # caching window (wraps past midnight)
+```
+
+For the full list of all 17 env vars and the bind-mount escape hatch, see [Customizing](#customizing) below.
 
 ## How It Works
 
@@ -92,20 +106,42 @@ docker logs fscache    # confirm fscache mounted successfully
 
 ## Customizing
 
-For vanilla installs, the baked-in config works out of the box. To tune cache behavior, mount a custom config over the default:
+### Environment variables (common tuning)
+
+Set `FSCACHE_*` environment variables in your compose file. All knobs have sensible defaults — only set what you want to change.
+
+| Variable | Default | Description |
+|---|---|---|
+| `FSCACHE_MAX_SIZE_GB` | `200.0` | Total cache budget in GB |
+| `FSCACHE_EXPIRY_HOURS` | `72` | Evict files not accessed within this window |
+| `FSCACHE_MIN_FREE_SPACE_GB` | `10.0` | Always keep at least this much free on the cache volume |
+| `FSCACHE_PLEX_LOOKAHEAD` | `4` | Episodes to prefetch ahead of what Plex is playing |
+| `FSCACHE_PLEX_MODE` | `miss-only` | When fscache intercepts Plex reads (`miss-only` or `always`) |
+| `FSCACHE_PRESET` | `plex-episode-prediction` | Behavior preset |
+| `FSCACHE_PREFETCH_MODE` | `cache-hit-only` | When to trigger prefetch (`cache-hit-only` or `always`) |
+| `FSCACHE_PREFETCH_MAX_DEPTH` | `3` | How many episodes deep to prefetch |
+| `FSCACHE_MAX_CACHE_PULL_PER_MOUNT_GB` | `0.0` | Per-session prefetch budget per mount (0 = unlimited) |
+| `FSCACHE_DEFERRED_TTL_MINUTES` | `1440` | Discard buffered events older than this on startup |
+| `FSCACHE_MIN_ACCESS_SECS` | `2` | Minimum seconds a file must stay open before prediction triggers (Docker default is 2 to filter scanner stat-ahead and thumbnail probes; bare-metal default is 0) |
+| `FSCACHE_MIN_FILE_SIZE_MB` | `0` | Skip files smaller than this — useful to ignore subtitle/metadata files |
+| `FSCACHE_CACHE_WINDOW_START` | `08:00` | Start of active caching window |
+| `FSCACHE_CACHE_WINDOW_END` | `02:00` | End of active caching window |
+| `FSCACHE_CONSOLE_LEVEL` | `info` | Console log level (`debug`, `info`, `warn`, `error`) |
+| `FSCACHE_FILE_LEVEL` | `debug` | Log file level |
+| `FSCACHE_REPEAT_LOG_WINDOW_SECS` | `300` | Suppress repeated log lines within this window |
+
+For multi-target setups, see [Multiple Libraries](#multiple-libraries) below.
+
+### Bind-mount escape hatch (advanced)
+
+Fields not exposed as env vars (`passthrough_mode`, process blocklists, file whitelist/blacklist) can only be changed by mounting a full config file:
 
 ```yaml
     volumes:
       - ./my-config.toml:/etc/fscache/config.toml:ro
 ```
 
-Copy `docker/default-config.toml` from this repo as a starting point.
-
-Common things to tune:
-- `[eviction] max_size_gb` — total cache budget (default: 200 GB)
-- `[eviction] expiry_hours` — evict files not accessed within this window (default: 72h)
-- `[plex] lookahead` — episodes to cache ahead (default: 4)
-- `[cache] min_file_size_mb` — skip small files like subtitles (default: 0, no filter)
+When `/etc/fscache/config.toml` exists at container start, the entrypoint uses it as-is and all `FSCACHE_*` env vars are ignored. Use `docker/config.template.toml` from this repo as a starting point.
 
 ## Multiple Libraries
 
@@ -117,22 +153,21 @@ Duplicate the fscache service with different names, volumes, and a custom config
 
 **Option B: Multi-target in one container** (fewer containers)
 
-Mount a custom config.toml with multiple `target_directories` and add matching volume mounts:
+Use `FSCACHE_TARGET` for the first path and `FSCACHE_TARGET_2`, `FSCACHE_TARGET_3`, … for additional paths, with matching volume mounts:
 
 ```yaml
+  fscache:
+    image: dudecmonman/fscache:latest
+    environment:
+      FSCACHE_TARGET:   /mnt/movies
+      FSCACHE_TARGET_2: /mnt/tv
+      FSCACHE_MAX_SIZE_GB: "500"
     volumes:
       - /mnt/movies:/mnt/movies:rshared
       - /mnt/tv:/mnt/tv:rshared
       - /ssd/fscache/cache:/cache
       - /ssd/fscache/state:/var/lib/fscache
-      - ./multi-library-config.toml:/etc/fscache/config.toml:ro
-```
-
-```toml
-[paths]
-target_directories = ["/mnt/movies", "/mnt/tv"]
-cache_directory    = "/cache"
-instance_name      = "fscache"
+    # caps, healthcheck, pid: host unchanged
 ```
 
 Note: for multi-target, use the same path inside and outside the container (e.g., `/mnt/movies:/mnt/movies`) so that the overmount trick works cleanly with `:rshared` propagation.

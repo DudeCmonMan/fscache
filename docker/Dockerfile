@@ -19,13 +19,15 @@ RUN cargo build --release --bin fscache
 FROM debian:bookworm-slim
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends fuse3 \
+ && apt-get install -y --no-install-recommends fuse3 gettext-base \
  && rm -rf /var/lib/apt/lists/*
 
 # Ensure state and log directories exist inside the image.
 RUN mkdir -p /var/lib/fscache/db /var/log/fscache /run/fscache /etc/fscache
 
 COPY --from=build /src/target/release/fscache /usr/local/bin/fscache
-COPY docker/default-config.toml /etc/fscache/config.toml
+COPY docker/config.template.toml /etc/fscache/config.template.toml
+COPY docker/entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
 
-CMD ["fscache", "start", "--config", "/etc/fscache/config.toml"]
+ENTRYPOINT ["/entrypoint.sh"]

@@ -1,0 +1,50 @@
+# ──────────────────────────────────────────────────────────────────────────
+# fscache Docker config template
+#
+# This file is rendered at container start by /entrypoint.sh. Do not edit
+# it directly — set FSCACHE_* environment variables in docker-compose.yml.
+#
+# To override individual values, set the corresponding env var (see README).
+# To override the full config, bind-mount your own file over
+# /etc/fscache/config.toml — the entrypoint will use it as-is.
+#
+# NOTE: the [paths] section is appended by the entrypoint after rendering,
+# using FSCACHE_TARGET / FSCACHE_TARGET_N to build target_directories.
+# ──────────────────────────────────────────────────────────────────────────
+
+[preset]
+name = "${FSCACHE_PRESET}"
+
+[plex]
+lookahead         = ${FSCACHE_PLEX_LOOKAHEAD}
+mode              = "${FSCACHE_PLEX_MODE}"
+process_blocklist = ["Plex Media Scanner", "Plex EAE Service", "Plex Media Fingerprinter"]
+
+[prefetch]
+mode              = "${FSCACHE_PREFETCH_MODE}"
+max_depth         = ${FSCACHE_PREFETCH_MAX_DEPTH}
+process_blocklist = []
+file_whitelist    = []
+file_blacklist    = []
+
+[eviction]
+max_size_gb       = ${FSCACHE_MAX_SIZE_GB}
+expiry_hours      = ${FSCACHE_EXPIRY_HOURS}
+min_free_space_gb = ${FSCACHE_MIN_FREE_SPACE_GB}
+
+[cache]
+passthrough_mode            = false
+max_cache_pull_per_mount_gb = ${FSCACHE_MAX_CACHE_PULL_PER_MOUNT_GB}
+deferred_ttl_minutes        = ${FSCACHE_DEFERRED_TTL_MINUTES}
+min_access_secs             = ${FSCACHE_MIN_ACCESS_SECS}
+min_file_size_mb            = ${FSCACHE_MIN_FILE_SIZE_MB}
+
+[schedule]
+cache_window_start = "${FSCACHE_CACHE_WINDOW_START}"
+cache_window_end   = "${FSCACHE_CACHE_WINDOW_END}"
+
+[logging]
+log_directory          = "/var/log/fscache"
+console_level          = "${FSCACHE_CONSOLE_LEVEL}"
+file_level             = "${FSCACHE_FILE_LEVEL}"
+repeat_log_window_secs = ${FSCACHE_REPEAT_LOG_WINDOW_SECS}

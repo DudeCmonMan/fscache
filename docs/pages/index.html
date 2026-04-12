@@ -784,83 +784,9 @@ footer a:hover { color: var(--text); }
     </p>
 
     <div class="diagram" style="padding: 24px; white-space: normal;">
-      <svg width="100%" viewBox="0 0 680 300" role="img" xmlns="http://www.w3.org/2000/svg">
-        <title>fscache architecture flow</title>
-        <desc>Application reads go through the FUSE layer, served from SSD cache on hit, or routed through the caching layer to the backing store on miss.</desc>
-        <defs>
-          <marker id="arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-            <path d="M2 1L8 5L2 9" fill="none" stroke="context-stroke" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
-          </marker>
-          <mask id="imagine-text-gaps-cl38l0" maskUnits="userSpaceOnUse"><rect x="0" y="0" width="680" height="300" fill="white"/><rect x="224.6728515625" y="7.721975326538086" width="172.3109130859375" height="19.111416816711426" fill="black" rx="2"/><rect x="56.91421127319336" y="115.02760314941406" width="36.389808654785156" height="21.944807052612305" fill="black" rx="2"/><rect x="31.096412658691406" y="133.4442901611328" width="87.46662902832031" height="19.111416816711426" fill="black" rx="2"/><rect x="181.31698608398438" y="115.02760314941406" width="80.22186279296875" height="21.944807052612305" fill="black" rx="2"/><rect x="170.4335174560547" y="133.4442901611328" width="102.51705932617188" height="19.111416816711426" fill="black" rx="2"/><rect x="320.43475341796875" y="43.72197341918945" width="151.73121643066406" height="19.111416816711426" fill="black" rx="2"/><rect x="264" y="173.7219696044922" width="35.184974670410156" height="19.111416816711426" fill="black" rx="2"/><rect x="507.0218200683594" y="52.0275993347168" width="79.31806945800781" height="21.944807052612305" fill="black" rx="2"/><rect x="515.2637329101562" y="70.44429016113281" width="64.22451782226562" height="19.111416816711426" fill="black" rx="2"/><rect x="359.2703552246094" y="143.02760314941406" width="54.830440521240234" height="21.944807052612305" fill="black" rx="2"/><rect x="337.8723449707031" y="202.02760314941406" width="99.10372161865234" height="21.944807052612305" fill="black" rx="2"/><rect x="350.06182861328125" y="220.4442901611328" width="74.80937957763672" height="19.111416816711426" fill="black" rx="2"/><rect x="497.61407470703125" y="202.02760314941406" width="99.08210754394531" height="21.944807052612305" fill="black" rx="2"/><rect x="511.50067138671875" y="220.4442901611328" width="72.65321350097656" height="19.111416816711426" fill="black" rx="2"/><rect x="254.6728515625" y="269.72198486328125" width="172.3109130859375" height="19.111416816711426" fill="black" rx="2"/></mask>
-        </defs>
-
-        <!-- Return: SSD → Plex -->
-        <path d="M547 45 Q547 28 533 28 L89 28 Q75 28 75 42 L75 108" fill="none" stroke="#1D9E75" stroke-width="1" marker-end="url(#arrow)"/>
-        <text x="310" y="22" text-anchor="middle" fill="#C2C0B6" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="12">File delivered directly to Plex</text>
-
-        <!-- Col 1: Plex -->
-        <g>
-          <rect x="20" y="108" width="110" height="50" rx="8" fill="#3C3489" stroke="#AFA9EC" stroke-width="0.5"/>
-          <text x="75" y="126" text-anchor="middle" dominant-baseline="central" fill="#CECBF6" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="14" font-weight="500">Plex</text>
-          <text x="75" y="143" text-anchor="middle" dominant-baseline="central" fill="#AFA9EC" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="12">Client service</text>
-        </g>
-
-        <!-- Arrow Plex → FUSE -->
-        <line x1="130" y1="133" x2="164" y2="133" stroke="#9C9A92" stroke-width="1.5" marker-end="url(#arrow)"/>
-
-        <!-- Col 2: FUSE -->
-        <g>
-          <rect x="166" y="108" width="110" height="50" rx="8" fill="#085041" stroke="#5DCAA5" stroke-width="0.5"/>
-          <text x="221" y="126" text-anchor="middle" dominant-baseline="central" fill="#9FE1CB" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="14" font-weight="500">FUSE layer</text>
-          <text x="221" y="143" text-anchor="middle" dominant-baseline="central" fill="#5DCAA5" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="12">Intercepts reads</text>
-        </g>
-
-        <!-- Arrow: FUSE → SSD (hit) -->
-        <path d="M276 120 L296 120 Q310 120 310 106 L310 84 Q310 70 324 70 L490 70" fill="none" stroke="#9C9A92" stroke-width="1.5" marker-end="url(#arrow)"/>
-        <text x="396" y="58" text-anchor="middle" fill="#C2C0B6" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="12">hit — path exists in cache</text>
-
-        <!-- Arrow: FUSE → Caching Layer (miss) -->
-        <path d="M276 146 L296 146 Q310 146 310 160 L310 206 Q310 220 324 220 L330 220" fill="none" stroke="#9C9A92" stroke-width="1.5" marker-end="url(#arrow)"/>
-        <text x="268" y="188" text-anchor="start" fill="#C2C0B6" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="12">miss</text>
-
-        <!-- SSD Cache -->
-        <g>
-          <rect x="492" y="45" width="110" height="50" rx="8" fill="#085041" stroke="#5DCAA5" stroke-width="0.5"/>
-          <text x="547" y="63" text-anchor="middle" dominant-baseline="central" fill="#9FE1CB" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="14" font-weight="500">SSD cache</text>
-          <text x="547" y="80" text-anchor="middle" dominant-baseline="central" fill="#5DCAA5" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="12">Fast, local</text>
-        </g>
-
-        <!-- SQLite -->
-        <g>
-          <rect x="342" y="132" width="90" height="44" rx="8" fill="#444441" stroke="#B4B2A9" stroke-width="0.5"/>
-          <text x="387" y="154" text-anchor="middle" dominant-baseline="central" fill="#D3D1C7" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="14" font-weight="500">SQLite</text>
-        </g>
-
-        <!-- Caching Layer -->
-        <g>
-          <rect x="332" y="195" width="110" height="50" rx="8" fill="#633806" stroke="#EF9F27" stroke-width="0.5"/>
-          <text x="387" y="213" text-anchor="middle" dominant-baseline="central" fill="#FAC775" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="14" font-weight="500">Caching layer</text>
-          <text x="387" y="230" text-anchor="middle" dominant-baseline="central" fill="#EF9F27" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="12">Preset logic</text>
-        </g>
-
-        <!-- Caching ↔ SQLite -->
-        <line x1="380" y1="195" x2="380" y2="178" stroke="#9C9A92" stroke-width="1.5" marker-end="url(#arrow)"/>
-        <line x1="394" y1="178" x2="394" y2="195" stroke="#9C9A92" stroke-width="1.5" marker-end="url(#arrow)"/>
-
-        <!-- Arrow: Caching → Backing Store -->
-        <line x1="442" y1="220" x2="490" y2="220" stroke="#9C9A92" stroke-width="1.5" marker-end="url(#arrow)"/>
-
-        <!-- Backing Store -->
-        <g>
-          <rect x="492" y="195" width="110" height="50" rx="8" fill="#712B13" stroke="#F0997B" stroke-width="0.5"/>
-          <text x="547" y="213" text-anchor="middle" dominant-baseline="central" fill="#F5C4B3" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="14" font-weight="500">Backing store</text>
-          <text x="547" y="230" text-anchor="middle" dominant-baseline="central" fill="#F0997B" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="12">NAS / array</text>
-        </g>
-
-        <!-- Return: Backing Store → Plex -->
-        <path d="M602 220 Q620 220 620 234 L620 274 Q620 288 606 288 L89 288 Q75 288 75 274 L75 158" fill="none" stroke="#D85A30" stroke-width="1" marker-end="url(#arrow)" mask="url(#imagine-text-gaps-cl38l0)"/>
-        <text x="340" y="284" text-anchor="middle" fill="#C2C0B6" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="12">File delivered directly to Plex</text>
-      </svg>
+      <img src="fscache_flowchart_v032.svg"
+           alt="fscache architecture flow"
+           style="width: 100%; display: block;">
     </div>
 
     <p>

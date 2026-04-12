@@ -33,7 +33,7 @@ fscache mounts a read-only FUSE filesystem **directly over** the existing filesy
 
 In the background, a preset-driven action engine watches which files are being opened and decides what else to cache — the next N episodes, neighboring files, or an entire directory tree, depending on how you configure it.
 
-![fscache architecture diagram](docs/pages/fscache_flowchart_v030.svg)
+![fscache architecture diagram](docs/pages/fscache_flowchart_v032.svg)
 
 On shutdown, the FUSE mount is lazily detached — any streams already in progress continue uninterrupted from their open file descriptors.
 

@@ -93,6 +93,13 @@ where
                     reason: visitor.reason.clone(),
                 },
             )),
+            Some(e) if e == telemetry::EVENT_COPY_PROGRESS => Some(DaemonMessage::Event(
+                TelemetryEvent::CopyProgress {
+                    path: visitor.path.clone(),
+                    bytes_copied: visitor.bytes_copied,
+                    size_bytes: visitor.size_bytes,
+                },
+            )),
             _ => None,
         };
 
@@ -134,12 +141,13 @@ struct EventVisitor {
     message:    Option<String>,
     path:       Option<String>,
     reason:     Option<String>,
-    bytes_read: Option<u64>,
-    size_bytes: Option<u64>,
-    used_bytes: Option<u64>,
-    max_bytes:  Option<u64>,
-    count:      Option<u64>,
-    allowed:    Option<bool>,
+    bytes_read:   Option<u64>,
+    bytes_copied: Option<u64>,
+    size_bytes:   Option<u64>,
+    used_bytes:   Option<u64>,
+    max_bytes:    Option<u64>,
+    count:        Option<u64>,
+    allowed:      Option<bool>,
 }
 
 impl Visit for EventVisitor {
@@ -155,11 +163,12 @@ impl Visit for EventVisitor {
 
     fn record_u64(&mut self, field: &Field, value: u64) {
         match field.name() {
-            "bytes_read" => self.bytes_read = Some(value),
-            "size_bytes" => self.size_bytes = Some(value),
-            "used_bytes" => self.used_bytes = Some(value),
-            "max_bytes"  => self.max_bytes  = Some(value),
-            "count"      => self.count      = Some(value),
+            "bytes_read"   => self.bytes_read   = Some(value),
+            "bytes_copied" => self.bytes_copied = Some(value),
+            "size_bytes"   => self.size_bytes   = Some(value),
+            "used_bytes"   => self.used_bytes   = Some(value),
+            "max_bytes"    => self.max_bytes    = Some(value),
+            "count"        => self.count        = Some(value),
             _ => {}
         }
     }

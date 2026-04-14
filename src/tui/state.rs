@@ -115,9 +115,10 @@ pub struct CachedFileInfo {
 }
 
 pub struct CopyProgress {
-    pub path:       PathBuf,
-    pub size_bytes: u64,
-    pub started_at: std::time::Instant,
+    pub path:         PathBuf,
+    pub size_bytes:   u64,
+    pub bytes_copied: u64,
+    pub started_at:   std::time::Instant,
 }
 
 impl CopyProgress {
@@ -165,28 +166,31 @@ impl CacheSort {
     }
 }
 
-/// Which of the 3 pages is currently displayed.
+/// Which page is currently displayed.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Page {
     Status,
     Cache,
+    CacheIo,
     Logs,
 }
 
 impl Page {
     pub fn next(self) -> Self {
         match self {
-            Self::Status => Self::Cache,
-            Self::Cache  => Self::Logs,
-            Self::Logs   => Self::Status,
+            Self::Status  => Self::Cache,
+            Self::Cache   => Self::CacheIo,
+            Self::CacheIo => Self::Logs,
+            Self::Logs    => Self::Status,
         }
     }
 
     pub fn prev(self) -> Self {
         match self {
-            Self::Status => Self::Logs,
-            Self::Cache  => Self::Status,
-            Self::Logs   => Self::Cache,
+            Self::Status  => Self::Logs,
+            Self::Cache   => Self::Status,
+            Self::CacheIo => Self::Cache,
+            Self::Logs    => Self::CacheIo,
         }
     }
 }

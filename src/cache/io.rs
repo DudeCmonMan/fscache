@@ -7,6 +7,7 @@ use std::os::unix::fs::MetadataExt;
 use std::os::unix::io::FromRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::{Mutex, Notify, Semaphore};
@@ -304,13 +305,48 @@ async fn copy_worker(io: CacheIO, rel_path: PathBuf) {
         rel_path.display(),
     );
 
+    let bytes_copied = Arc::new(AtomicU64::new(0));
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+
+    // Fires zero times for copies that complete in under 500 ms.
+    {
+        let ticker_bytes = Arc::clone(&bytes_copied);
+        let ticker_path  = rel_path.clone();
+        let ticker_size  = size_bytes;
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_millis(500));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            interval.tick().await; // discard immediate first tick
+            let mut done = done_rx;
+            loop {
+                tokio::select! {
+                    _ = &mut done => break,
+                    _ = interval.tick() => {
+                        tracing::debug!(
+                            event = telemetry::EVENT_COPY_PROGRESS,
+                            path = %ticker_path.display(),
+                            bytes_copied = ticker_bytes.load(Ordering::Relaxed),
+                            size_bytes = ticker_size,
+                            "cache_io: progress",
+                        );
+                    }
+                }
+            }
+        });
+    }
+
     let bs = Arc::clone(&io.backing_store);
     let rel = rel_path.clone();
     let dest = cache_dest.clone();
+    let progress = Arc::clone(&bytes_copied);
     let result = tokio::task::spawn_blocking(move || {
-        perform_copy(&bs, &rel, &dest)
+        perform_copy(&bs, &rel, &dest, &progress)
     })
     .await;
+
+    // Stop the ticker before emitting COPY_COMPLETE / COPY_FAILED so no
+    // late progress event races past the completion signal.
+    let _ = done_tx.send(());
 
     match result {
         Ok(Ok(())) => {
@@ -379,6 +415,7 @@ fn perform_copy(
     bs: &BackingStore,
     rel_path: &Path,
     cache_dest: &Path,
+    bytes_copied: &AtomicU64,
 ) -> std::io::Result<()> {
     if let Some(parent) = cache_dest.parent() {
         std::fs::create_dir_all(parent)?;
@@ -417,6 +454,7 @@ fn perform_copy(
             let n = src.read(&mut buf)?;
             if n == 0 { break; }
             dst.write_all(&buf[..n])?;
+            bytes_copied.fetch_add(n as u64, Ordering::Relaxed);
         }
         Ok(())
     })();
@@ -483,5 +521,6 @@ pub fn copy_for_tests(
     rel_path: &Path,
     cache_dest: &Path,
 ) -> std::io::Result<()> {
-    perform_copy(bs, rel_path, cache_dest)
+    let dummy = AtomicU64::new(0);
+    perform_copy(bs, rel_path, cache_dest, &dummy)
 }

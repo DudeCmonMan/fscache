@@ -192,6 +192,12 @@ async fn event_loop(
                             menu = None;
                         }
                         KeyCode::Char('3') => {
+                            page = Page::CacheIo;
+                            log_scroll = 0;
+                            checked.clear();
+                            menu = None;
+                        }
+                        KeyCode::Char('4') => {
                             page = Page::Logs;
                             log_scroll = 0;
                             checked.clear();

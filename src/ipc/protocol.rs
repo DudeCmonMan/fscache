@@ -72,6 +72,11 @@ pub enum TelemetryEvent {
     CopyFailed {
         path: Option<String>,
     },
+    CopyProgress {
+        path: Option<String>,
+        bytes_copied: Option<u64>,
+        size_bytes: Option<u64>,
+    },
     DeferredChanged {
         count: Option<u64>,
     },

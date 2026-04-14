@@ -128,9 +128,21 @@ fn apply_event(event: &TelemetryEvent, state: &DashboardState) {
                     CopyProgress {
                         path: p,
                         size_bytes: size_bytes.unwrap_or(0),
+                        bytes_copied: 0,
                         started_at: Instant::now(),
                     },
                 );
+            }
+        }
+        TelemetryEvent::CopyProgress { path, bytes_copied, size_bytes } => {
+            if let (Some(p), Some(bc)) = (path, bytes_copied) {
+                let mut ac = state.active_copies.lock().unwrap();
+                if let Some(cp) = ac.get_mut(std::path::Path::new(p)) {
+                    cp.bytes_copied = *bc;
+                    if let Some(sz) = size_bytes { cp.size_bytes = *sz; }
+                }
+                // If no entry exists (reconnect before CopyStarted replay), silently
+                // drop — the natural lifecycle catches up within ≤500 ms.
             }
         }
         TelemetryEvent::CopyComplete { path } => {

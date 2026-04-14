@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering::Relaxed;
 use std::time::{Duration, SystemTime};
 
@@ -34,14 +34,15 @@ pub fn render(
     render_tab_bar(f, chunks[0], page);
 
     match page {
-        Page::Status => render_status(f, chunks[1], state),
-        Page::Cache  => {
+        Page::Status  => render_status(f, chunks[1], state),
+        Page::Cache   => {
             render_cache(f, chunks[1], state, cache_sel, cache_sort, checked, status_msg);
             if let Some(sel) = menu {
                 render_action_menu(f, chunks[1], sel);
             }
         }
-        Page::Logs   => render_logs(f, chunks[1], state, log_scroll),
+        Page::CacheIo => render_cache_io(f, chunks[1], state),
+        Page::Logs    => render_logs(f, chunks[1], state, log_scroll),
     }
 }
 
@@ -49,9 +50,10 @@ pub fn render(
 
 fn render_tab_bar(f: &mut Frame, area: Rect, active: Page) {
     let tabs = [
-        (Page::Status, "1 Status"),
-        (Page::Cache,  "2 Cache"),
-        (Page::Logs,   "3 Logs"),
+        (Page::Status,  "1 Status"),
+        (Page::Cache,   "2 Cache"),
+        (Page::CacheIo, "3 Cache I/O"),
+        (Page::Logs,    "4 Logs"),
     ];
 
     let spans: Vec<Span> = tabs.iter().enumerate().flat_map(|(i, (page, label))| {
@@ -72,7 +74,7 @@ fn render_tab_bar(f: &mut Frame, area: Rect, active: Page) {
         }
     }).collect();
 
-    let hint = Span::styled("  ←→/1-3: pages  q: quit", Style::default().fg(Color::DarkGray));
+    let hint = Span::styled("  ←→/1-4: pages  q: quit", Style::default().fg(Color::DarkGray));
     let mut all = spans;
     all.push(hint);
 
@@ -221,7 +223,7 @@ fn render_activity(f: &mut Frame, area: Rect, state: &DashboardState) {
         if total > 0 { format!("{:.1}%", hits as f64 / total as f64 * 100.0) } else { "—".to_string() }
     };
 
-    let mut lines = vec![
+    let lines = vec![
         Line::from(format!(" FUSE")),
         Line::from(format!("   Opens: {}   Hits: {} ({})   Misses: {}", opens, hits, hit_rate, misses)),
         Line::from(format!("   Bytes read: {}   Open handles: {}", fmt_bytes(bytes), handles)),
@@ -232,18 +234,6 @@ fn render_activity(f: &mut Frame, area: Rect, state: &DashboardState) {
         Line::from(format!(" Evictions")),
         Line::from(format!("   Expired: {}   Size-limit: {}", ev_exp, ev_size)),
     ];
-
-    let active_copies = state.active_copies.lock().unwrap();
-    for (i, cp) in active_copies.values().enumerate() {
-        lines.push(Line::from(format!(
-            "   [{}] Copying: {}   {:.1} GB   {}s elapsed",
-            i + 1,
-            cp.path.file_name().unwrap_or_default().to_string_lossy(),
-            gb(cp.size_bytes),
-            cp.elapsed_secs(),
-        )));
-    }
-    drop(active_copies);
 
     f.render_widget(
         Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" Activity ")),
@@ -262,7 +252,7 @@ fn render_recent_logs(f: &mut Frame, area: Rect, state: &DashboardState) {
             Span::raw(e.message.clone()),
         ]))
     }).collect();
-    let title = format!(" Recent Logs ({} total — see page 3) ", total);
+    let title = format!(" Recent Logs ({} total — see page 4) ", total);
     drop(logs);
 
     f.render_widget(
@@ -453,7 +443,145 @@ fn render_action_menu(f: &mut Frame, area: Rect, sel: usize) {
     );
 }
 
-// ---- Page 3: Logs ----
+// ---- Page 3: Cache I/O ----
+
+fn render_cache_io(f: &mut Frame, area: Rect, state: &DashboardState) {
+    let rows = Layout::vertical([
+        Constraint::Length(5),
+        Constraint::Length(5),
+        Constraint::Min(10),
+    ]).split(area);
+
+    render_cacheio_usage(f, rows[0], state);
+    render_cacheio_pipeline(f, rows[1], state);
+    render_cacheio_inflight(f, rows[2], state);
+}
+
+fn render_cacheio_usage(f: &mut Frame, area: Rect, state: &DashboardState) {
+    let used  = state.cache_used_bytes.load(Relaxed);
+    let max   = (state.config.eviction.max_size_gb * 1_073_741_824.0) as u64;
+    let free  = state.cache_free_bytes.load(Relaxed);
+    let files = state.cache_file_count.load(Relaxed);
+
+    let ratio = if max > 0 { (used as f64 / max as f64).clamp(0.0, 1.0) } else { 0.0 };
+    let gauge_label = format!("{:.1} / {:.1} GB", gb(used), gb(max));
+    let gauge_color = if ratio > 0.9 { Color::Red } else if ratio > 0.75 { Color::Yellow } else { Color::Green };
+
+    let block = Block::default().borders(Borders::ALL).title(" Cache Usage ");
+    f.render_widget(block, area);
+    let inner = area.inner(ratatui::layout::Margin { vertical: 1, horizontal: 1 });
+    let sub = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+    ]).split(inner);
+
+    f.render_widget(
+        Gauge::default()
+            .gauge_style(Style::default().fg(gauge_color))
+            .ratio(ratio)
+            .label(gauge_label),
+        sub[0],
+    );
+    f.render_widget(Paragraph::new(format!(" Free: {:.1} GB", gb(free))), sub[1]);
+    f.render_widget(Paragraph::new(format!(" Files: {}", files)), sub[2]);
+}
+
+fn render_cacheio_pipeline(f: &mut Frame, area: Rect, state: &DashboardState) {
+    let in_flight = state.in_flight_count.load(Relaxed);
+    let deferred  = state.deferred_count.load(Relaxed);
+    let done      = state.completed_copies.load(Relaxed);
+    let failed    = state.failed_copies.load(Relaxed);
+    let allowed   = state.caching_allowed.load(Relaxed);
+    let ev_exp    = state.evictions_expired.load(Relaxed);
+    let ev_size   = state.evictions_size.load(Relaxed);
+
+    let window_str = if allowed { "OPEN" } else { "CLOSED" };
+    let window_color = if allowed { Color::Green } else { Color::Red };
+
+    let block = Block::default().borders(Borders::ALL).title(" Pipeline ");
+    f.render_widget(block, area);
+    let inner = area.inner(ratatui::layout::Margin { vertical: 1, horizontal: 1 });
+    let sub = Layout::vertical([Constraint::Length(1), Constraint::Length(1)]).split(inner);
+
+    f.render_widget(
+        Paragraph::new(format!(
+            " In-flight: {}   Deferred: {}   Completed: {}   Failed: {}",
+            in_flight, deferred, done, failed,
+        )),
+        sub[0],
+    );
+    f.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::raw(format!(" Window: ")),
+            Span::styled(window_str, Style::default().fg(window_color)),
+            Span::raw(format!("   Evictions — expired: {}  size-limit: {}", ev_exp, ev_size)),
+        ])),
+        sub[1],
+    );
+}
+
+fn render_cacheio_inflight(f: &mut Frame, area: Rect, state: &DashboardState) {
+    let block = Block::default().borders(Borders::ALL).title(" In-flight Transfers ");
+    f.render_widget(block.clone(), area);
+    let inner = area.inner(ratatui::layout::Margin { vertical: 1, horizontal: 1 });
+
+    let copies = state.active_copies.lock().unwrap();
+    let mut sorted: Vec<_> = copies.values().collect();
+    sorted.sort_by_key(|c| c.started_at);
+
+    if sorted.is_empty() {
+        f.render_widget(
+            Paragraph::new(" No active copies.").style(Style::default().fg(Color::DarkGray)),
+            inner,
+        );
+        return;
+    }
+
+    // Each copy occupies 2 rows (title + gauge) + 1 spacer = 3 rows.
+    let max_visible = (inner.height as usize / 3).max(1);
+    let mut y = inner.y;
+
+    for cp in sorted.iter().take(max_visible) {
+        if y + 2 > inner.y + inner.height {
+            break;
+        }
+
+        let title_area = Rect { x: inner.x, y, width: inner.width, height: 1 };
+        let gauge_area = Rect { x: inner.x, y: y + 1, width: inner.width, height: 1 };
+
+        let elapsed = cp.elapsed_secs();
+        let path_str = truncate_path_tail(&cp.path, 3);
+        // Right-align elapsed; pad path to fill the remaining space.
+        let elapsed_label = format!("{}s", elapsed);
+        let pad = (inner.width as usize).saturating_sub(path_str.len() + elapsed_label.len() + 1);
+        let title_line = format!("{}{:pad$}{}", path_str, "", elapsed_label, pad = pad);
+        f.render_widget(Paragraph::new(title_line), title_area);
+
+        let ratio = if cp.size_bytes > 0 {
+            (cp.bytes_copied as f64 / cp.size_bytes as f64).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let gauge_label = if cp.size_bytes > 0 {
+            let pct = (ratio * 100.0) as u64;
+            format!("{} / {}  ({}%)", fmt_bytes(cp.bytes_copied), fmt_bytes(cp.size_bytes), pct)
+        } else {
+            format!("{} / ?", fmt_bytes(cp.bytes_copied))
+        };
+        f.render_widget(
+            Gauge::default()
+                .gauge_style(Style::default().fg(Color::Cyan))
+                .ratio(ratio)
+                .label(gauge_label),
+            gauge_area,
+        );
+
+        y += 3;
+    }
+}
+
+// ---- Page 4: Logs ----
 
 fn render_logs(f: &mut Frame, area: Rect, state: &DashboardState, scroll: usize) {
     let logs = state.recent_logs.lock().unwrap();
@@ -522,6 +650,20 @@ fn fmt_duration_until(t: SystemTime) -> String {
     let h = secs / 3600;
     let m = (secs % 3600) / 60;
     format!("{}h {}m", h, m)
+}
+
+/// Returns the last `n` path components joined by `/`, prefixed with `…/` if truncated.
+/// Always preserves the filename: `…/Show/S01E01.mkv`, never `/mnt/Long/Path/…`.
+fn truncate_path_tail(p: &Path, n: usize) -> String {
+    let parts: Vec<_> = p.iter().collect();
+    if parts.len() <= n {
+        p.display().to_string()
+    } else {
+        let tail: Vec<String> = parts.iter().rev().take(n).rev()
+            .map(|s| s.to_string_lossy().into_owned())
+            .collect();
+        format!("…/{}", tail.join("/"))
+    }
 }
 
 fn log_level_color(level: &str) -> Color {

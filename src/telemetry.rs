@@ -6,6 +6,7 @@ pub const EVENT_COPY_QUEUED: &str = "copy_queued";
 pub const EVENT_COPY_STARTED: &str = "copy_started";
 pub const EVENT_COPY_COMPLETE: &str = "copy_complete";
 pub const EVENT_COPY_FAILED: &str = "copy_failed";
+pub const EVENT_COPY_PROGRESS: &str = "copy_progress";
 pub const EVENT_DEFERRED_CHANGED: &str = "deferred_changed";
 pub const EVENT_BUDGET_UPDATED: &str = "budget_updated";
 pub const EVENT_CACHING_WINDOW: &str = "caching_window";

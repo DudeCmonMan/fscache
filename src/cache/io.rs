@@ -393,7 +393,6 @@ async fn copy_worker(io: CacheIO, rel_path: PathBuf) {
     finish_known(&io, &rel_path).await;
 }
 
-/// Remove a path from `known` and delete its DB row. Called on copy completion.
 async fn finish_known(io: &CacheIO, rel_path: &Path) {
     io.state.lock().await.known.remove(rel_path);
     io.cache.cache_db().remove_deferred(rel_path);

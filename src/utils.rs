@@ -190,9 +190,7 @@ mod tests {
         let lock_path = dir.path().join("test.lock");
         {
             let _held = flock_exclusive(&lock_path).unwrap();
-            // lock is held here
         }
-        // lock released on drop — should be acquirable again
         assert!(flock_exclusive(&lock_path).is_ok());
     }
 

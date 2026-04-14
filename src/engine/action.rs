@@ -114,7 +114,6 @@ impl ActionEngine {
                                         event.relative_path.display(), entry.open_handles, entry.total_bytes_read
                                     );
                                     if entry.open_handles == 0 {
-                                        // Last handle closed — evaluate now.
                                         let entry = pending.remove(&event.relative_path).unwrap();
                                         let file_size = backing_store.file_size(&event.relative_path).unwrap_or(0);
                                         if file_size > 0 && entry.total_bytes_read >= file_size {
@@ -126,9 +125,7 @@ impl ActionEngine {
                                                 event.relative_path.display(), min_access_secs);
                                         }
                                     }
-                                    // else: handles still open — let timer decide, skip on_close.
                                 } else {
-                                    // Not in pending — forward Close directly.
                                     to_process.push(event);
                                 }
                             } else {

@@ -131,7 +131,6 @@ impl FuseHarness {
         })
     }
 
-    /// Returns the `CacheManager` for this harness.
     /// Panics if the harness was created without a cache (e.g. via `new()`).
     pub fn cache_mgr(&self) -> &Arc<CacheManager> {
         self.cache_mgr.as_ref().expect("harness has no cache manager")

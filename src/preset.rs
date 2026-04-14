@@ -87,17 +87,14 @@ pub trait CachePreset: Send + Sync + 'static {
         false
     }
 
-    /// Called when a file is opened and not in cache.
     fn on_miss(&self, _path: &Path, _ctx: &RuleContext) -> Vec<CacheAction> {
         vec![]
     }
 
-    /// Called when a file is opened and already in cache.
     fn on_hit(&self, _path: &Path, _ctx: &RuleContext) -> Vec<CacheAction> {
         vec![]
     }
 
-    /// Called when a file handle is closed.
     fn on_close(&self, _path: &Path, _bytes_read: u64, _ctx: &RuleContext) -> Vec<CacheAction> {
         vec![]
     }

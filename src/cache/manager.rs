@@ -124,12 +124,10 @@ impl CacheManager {
         p.exists() && !p.extension().map_or(false, |e| e == "partial")
     }
 
-    /// Unique identifier for this mount's cache partition in the shared DB.
     pub fn mount_id(&self) -> &str {
         &self.mount_id
     }
 
-    /// Whether the FUSE hot-path stale check is enabled.
     pub fn check_on_hit(&self) -> bool {
         self.check_on_hit
     }

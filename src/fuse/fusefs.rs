@@ -23,6 +23,25 @@ use crate::engine::action::AccessEvent;
 /// Short TTL so the kernel re-checks after a cache file appears.
 const TTL: Duration = Duration::from_secs(1);
 
+/// Outcome of a FUSE open() call. Drives log emission, engine notification, and
+/// future cross-cutting hooks (e.g. process-discoverability).
+///
+/// Note: `Filtered` means the preset's `should_filter` returned true — a runtime,
+/// preset-driven decision. This is distinct from the discovery `BLK` column which
+/// reflects whether the process name appears in the config's `process_blocklist`.
+/// They overlap but are not equivalent (e.g. PlexEpisodePrediction also filters
+/// Plex Transcoder via cmdline inspection, independent of the blocklist).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum OpenOutcome {
+    /// Served from the SSD cache.
+    Hit,
+    /// Served from the backing store; eligible for caching by the action engine.
+    Miss,
+    /// Served from the backing store; preset suppressed engine notification — the
+    /// access will not influence cache population or eviction decisions.
+    Filtered,
+}
+
 pub struct FsCache {
     /// O_PATH fd opened to target_directory *before* the FUSE overmount.
     pub backing_store: Arc<BackingStore>,
@@ -189,6 +208,104 @@ impl FsCache {
         unsafe { libc::closedir(dir) };
         entries
     }
+
+    /// Attempt to serve `path` from the cache, falling back to the backing store.
+    /// Handles the cache-hit-race fall-through internally.
+    ///
+    /// `filtered` is passed through only to determine the return outcome (Hit vs
+    /// Miss vs Filtered) — it does not affect which store is attempted.
+    fn try_open(&self, path: &Path, filtered: bool) -> Result<(i32, OpenOutcome), Errno> {
+        if !self.passthrough_mode {
+            if let Some(ref cache) = self.cache {
+                if cache.is_cached(path) {
+                    let mut open_from_cache = true;
+
+                    if cache.check_on_hit() {
+                        match cache.is_stale(path) {
+                            StaleResult::Stale | StaleResult::BackingGone => {
+                                tracing::info!(
+                                    event = telemetry::EVENT_EVICTION,
+                                    path = %path.display(),
+                                    reason = telemetry::EVICTION_REASON_STALE_ON_HIT,
+                                    "stale cache drop on hit: {:?}", path,
+                                );
+                                cache.drop_stale(path, telemetry::EVICTION_REASON_STALE_ON_HIT);
+                                open_from_cache = false;
+                            }
+                            StaleResult::NeedsBackfill(st) => {
+                                cache.backfill_fingerprint(path, &st);
+                            }
+                            StaleResult::Fresh | StaleResult::NotTracked => {}
+                        }
+                    }
+
+                    if open_from_cache {
+                        let cache_path = cache.cache_path(path);
+                        let c = path_to_cstring_abs(&cache_path);
+                        let fd = unsafe { libc::open(c.as_ptr(), libc::O_RDONLY) };
+                        if fd >= 0 {
+                            // Update LRU timestamp in DB (non-blocking; best-effort).
+                            cache.mark_hit(path);
+                            return Ok((fd, OpenOutcome::Hit));
+                        }
+                        // Cache file vanished between check and open — fall through.
+                        tracing::warn!("cache hit race for {:?}, falling back to backing store", path);
+                    }
+                }
+            }
+        }
+
+        let fd = self.backing_store.open_file(path)
+            .map_err(|_| Errno::from_i32(last_errno()))?;
+        Ok((fd, if filtered { OpenOutcome::Filtered } else { OpenOutcome::Miss }))
+    }
+
+    /// Emit the appropriate tracing line for an open() outcome.
+    ///
+    /// HIT is always INFO (confirms cache is working; never suppressed).
+    /// Filtered is always INFO ("ignored process access").
+    /// Miss respects the repeat-log suppress window: DEBUG when suppressed, INFO otherwise.
+    fn log_open_outcome(
+        &self,
+        path: &Path,
+        opener: Option<&str>,
+        pid: u32,
+        outcome: OpenOutcome,
+        suppress: bool,
+    ) {
+        let opener = opener.unwrap_or("?");
+        match outcome {
+            OpenOutcome::Hit => {
+                tracing::info!(
+                    event = telemetry::EVENT_CACHE_HIT,
+                    path = %path.display(),
+                    "cache HIT: {:?} (serving from SSD)", path,
+                );
+            }
+            OpenOutcome::Filtered => {
+                tracing::info!(
+                    "ignored process access: {:?} (filtered by preset, not caching) [opener: {} pid={}]",
+                    path, opener, pid,
+                );
+            }
+            OpenOutcome::Miss if suppress => {
+                tracing::debug!(
+                    event = telemetry::EVENT_CACHE_MISS,
+                    path = %path.display(),
+                    "cache MISS: {:?} (serving from backing store) [opener: {} pid={}]",
+                    path, opener, pid,
+                );
+            }
+            OpenOutcome::Miss => {
+                tracing::info!(
+                    event = telemetry::EVENT_CACHE_MISS,
+                    path = %path.display(),
+                    "cache MISS: {:?} (serving from backing store) [opener: {} pid={}]",
+                    path, opener, pid,
+                );
+            }
+        }
+    }
 }
 
 impl Filesystem for FsCache {
@@ -270,83 +387,34 @@ impl Filesystem for FsCache {
 
         tracing::debug!(event = telemetry::EVENT_FUSE_OPEN, path = %path.display(), "fuse open");
 
-        if !self.passthrough_mode {
-            if let Some(ref cache) = self.cache {
-                if cache.is_cached(&path) {
-                    // Stale check (opt-in via check_on_hit = true in config).
-                    // Sets open_from_cache = false if the entry is stale so we fall
-                    // through to the backing store after dropping the cache file.
-                    let mut open_from_cache = true;
-
-                    if cache.check_on_hit() {
-                        match cache.is_stale(&path) {
-                            StaleResult::Stale | StaleResult::BackingGone => {
-                                tracing::info!(
-                                    event = telemetry::EVENT_EVICTION,
-                                    path = %path.display(),
-                                    reason = telemetry::EVICTION_REASON_STALE_ON_HIT,
-                                    "stale cache drop on hit: {:?}", path,
-                                );
-                                cache.drop_stale(&path, telemetry::EVICTION_REASON_STALE_ON_HIT);
-                                open_from_cache = false;
-                            }
-                            StaleResult::NeedsBackfill(st) => {
-                                // Pre-migration row — backfill and serve from cache.
-                                cache.backfill_fingerprint(&path, &st);
-                            }
-                            StaleResult::Fresh | StaleResult::NotTracked => {}
-                        }
-                    }
-
-                    if open_from_cache {
-                        let cache_path = cache.cache_path(&path);
-                        let c = path_to_cstring_abs(&cache_path);
-                        let fd = unsafe { libc::open(c.as_ptr(), libc::O_RDONLY) };
-                        if fd >= 0 {
-                            // Always log cache hits at INFO — they confirm the cache is working
-                            // and should never be suppressed by the repeat log window.
-                            tracing::info!(event = telemetry::EVENT_CACHE_HIT, path = %path.display(), "cache HIT: {:?} (serving from SSD)", path);
-                            // Update LRU timestamp in DB (non-blocking; best-effort).
-                            cache.mark_hit(&path);
-                            if !filtered {
-                                if let Some(ref tx) = self.access_tx {
-                                    let _ = tx.send(AccessEvent::hit(path.clone()));
-                                }
-                                self.open_paths.lock().unwrap().insert(fd as u64, path.clone());
-                            }
-                            self.open_bytes.lock().unwrap().insert(fd as u64, 0);
-                            reply.opened(FileHandle(fd as u64), FopenFlags::empty());
-                            return;
-                        }
-                        // Cache file vanished between check and open — fall through.
-                        tracing::warn!("cache hit race for {:?}, falling back to backing store", path);
-                    }
-                }
-            }
-        }
-
-        let fd = match self.backing_store.open_file(&path) {
-            Ok(fd) => fd,
-            Err(_) => { reply.error(Errno::from_i32(last_errno())); return; }
+        let (fd, outcome) = match self.try_open(&path, filtered) {
+            Ok(v) => v,
+            Err(e) => { reply.error(e); return; }
         };
 
-        let opener = opener_name.as_deref().unwrap_or("?");
-        if filtered {
-            tracing::info!("ignored process access: {:?} (filtered by preset, not caching) [opener: {} pid={}]", path, opener, req.pid());
-        } else if suppress {
-            tracing::debug!(event = telemetry::EVENT_CACHE_MISS, path = %path.display(), "cache MISS: {:?} (serving from backing store) [opener: {} pid={}]", path, opener, req.pid());
-        } else {
-            tracing::info!(event = telemetry::EVENT_CACHE_MISS, path = %path.display(), "cache MISS: {:?} (serving from backing store) [opener: {} pid={}]", path, opener, req.pid());
-        }
+        self.log_open_outcome(&path, opener_name.as_deref(), req.pid(), outcome, suppress);
 
-        if !filtered && !self.passthrough_mode {
-            if let Some(ref tx) = self.access_tx {
-                let _ = tx.send(AccessEvent::miss(path.clone()));
+        // Engine notification — filtered opens never notify the engine.
+        // Passthrough mode also skips engine notification for misses (no caching desired).
+        // Hit is only reachable from try_open when !passthrough_mode, so no extra guard needed.
+        if !filtered {
+            let engine_event = match outcome {
+                OpenOutcome::Hit => Some(AccessEvent::hit(path.clone())),
+                OpenOutcome::Miss if !self.passthrough_mode => Some(AccessEvent::miss(path.clone())),
+                OpenOutcome::Miss | OpenOutcome::Filtered => None,
+            };
+            if let Some(event) = engine_event {
+                if let Some(ref tx) = self.access_tx {
+                    let _ = tx.send(event);
+                }
+                self.open_paths.lock().unwrap().insert(fd as u64, path.clone());
             }
-            self.open_paths.lock().unwrap().insert(fd as u64, path.clone());
         }
 
         self.open_bytes.lock().unwrap().insert(fd as u64, 0);
+
+        // TODO(discovery): self.discovery.as_ref().map(|d| d.log_open(&process, outcome));
+
         reply.opened(FileHandle(fd as u64), FopenFlags::empty());
     }
 

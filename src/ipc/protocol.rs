@@ -39,9 +39,8 @@ pub enum ClientMessage {
     EvictFiles { files: Vec<FileTarget> },
     /// Reset `last_hit_at` to now, extending each file's eviction deadline.
     RefreshLease { files: Vec<FileTarget> },
-    /// Arm the process-discovery collector. `duration_secs = None` uses the
-    /// configured default; pass `0` for indefinite.
-    DiscoveryStart { duration_secs: Option<u64> },
+    /// Arm the process-discovery collector.
+    DiscoveryStart,
     /// Disarm the process-discovery collector (flushes the in-flight bucket).
     DiscoveryStop,
 }
@@ -96,12 +95,10 @@ pub enum TelemetryEvent {
         path: Option<String>,
         reason: Option<String>,
     },
-    /// Broadcast on discovery state changes and periodically as a heartbeat.
-    /// Newly-connected `fscache discover status` clients wait for this event.
+    /// Broadcast on discovery state changes. `fscache discover stat` reads this on connect.
     DiscoveryStatus {
         enabled: bool,
         started_at: Option<i64>,
-        auto_stop_at: Option<i64>,
     },
 }
 

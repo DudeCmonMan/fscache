@@ -1,8 +1,8 @@
 /// End-to-end integration tests for the process discovery pipeline.
 ///
 /// Exercises DiscoveryController in isolation (no real FUSE) against a real
-/// CacheDb, and also exercises the DiscoveryStart/DiscoveryStop/DiscoveryStatus
-/// IPC round-trip via a live run_ipc_server.
+/// CacheDb, and also exercises the DiscoveryStart/DiscoveryStop IPC round-trip
+/// via a live run_ipc_server.
 ///
 /// Tests are single-threaded (#[tokio::test] default) so tracing::subscriber::set_default
 /// works correctly for tracing-capture tests.
@@ -78,7 +78,6 @@ fn default_config() -> DiscoveryConfig {
         enabled: false,
         window_days: 7,
         bucket_interval_secs: 60,
-        default_duration_secs: 3600,
         pid_lru_capacity: 512,
         pid_lru_ttl_secs: 300,
     }
@@ -108,7 +107,7 @@ fn capture_discovery_trace() -> (Arc<Mutex<Vec<u8>>>, tracing::subscriber::Defau
         .event_format(DiscoveryFormatter)
         .with_filter(
             tracing_subscriber::filter::Targets::new()
-                .with_target("fscache::discovery", tracing::Level::INFO),
+                .with_target("fscache::discovery", tracing::Level::DEBUG),
         );
     let subscriber = tracing_subscriber::registry().with(layer);
     let guard = tracing::subscriber::set_default(subscriber);
@@ -194,7 +193,7 @@ async fn start_stop_toggles_status_and_broadcasts() {
 
     assert!(!ctrl.status().enabled, "should start disabled");
 
-    ctrl.start(Some(3600)).unwrap();
+    ctrl.start().unwrap();
     assert!(ctrl.status().enabled, "should be enabled after start()");
 
     let ev = next_discovery_status(&mut rx).await;
@@ -249,7 +248,7 @@ async fn log_open_emits_new_once_per_process() {
     let (buf, _guard) = capture_discovery_trace();
     let (ctrl, _, _root) = make_controller(default_config(), in_memory_db());
 
-    ctrl.start(Some(3600)).unwrap();
+    ctrl.start().unwrap();
 
     let proc = fake_process("cat", 42);
     ctrl.log_open(&proc, OpenOutcome::Hit);
@@ -284,13 +283,12 @@ async fn drain_writes_rows_to_db() {
     let (ctrl, _, root) = make_controller(
         DiscoveryConfig {
             bucket_interval_secs: 1,
-            default_duration_secs: 0, // no auto-stop
             ..default_config()
         },
         Arc::clone(&db),
     );
 
-    ctrl.start(None).unwrap();
+    ctrl.start().unwrap();
 
     ctrl.log_open(&fake_process("plex_scanner", 10), OpenOutcome::Miss);
     ctrl.log_open(&fake_process("plex_scanner", 10), OpenOutcome::Miss);
@@ -324,7 +322,7 @@ async fn snap_and_new_tracing_format() {
     let (buf, _guard) = capture_discovery_trace();
     let (ctrl, _, _root) = make_controller(default_config(), in_memory_db());
 
-    ctrl.start(Some(3600)).unwrap();
+    ctrl.start().unwrap();
 
     ctrl.log_open(&fake_process("vlc", 1), OpenOutcome::Hit);
     ctrl.log_open(&fake_process("ffmpeg", 2), OpenOutcome::Miss);
@@ -361,44 +359,7 @@ async fn snap_and_new_tracing_format() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 6: auto-stop clears enabled after duration expires
-// ---------------------------------------------------------------------------
-
-#[tokio::test]
-async fn auto_stop_clears_enabled_after_duration() {
-    let (ctrl, tx, _root) = make_controller(
-        DiscoveryConfig {
-            bucket_interval_secs: 60, // no drain ticks during the test
-            ..default_config()
-        },
-        in_memory_db(),
-    );
-    let mut rx = tx.subscribe();
-
-    ctrl.start(Some(1)).unwrap();
-    assert!(ctrl.status().enabled);
-
-    // Subscribe and drain the enabled=true broadcast first.
-    let _ = next_discovery_status(&mut rx).await;
-
-    // Wait for auto-stop (1s duration + buffer).
-    tokio::time::sleep(Duration::from_millis(1400)).await;
-
-    assert!(
-        !ctrl.status().enabled,
-        "auto-stop should disable the controller after 1s"
-    );
-
-    // The drain_loop post-stop continuation broadcasts enabled=false.
-    let ev = next_discovery_status(&mut rx).await;
-    assert!(
-        matches!(ev, TelemetryEvent::DiscoveryStatus { enabled: false, .. }),
-        "expected enabled=false broadcast after auto-stop, got {ev:?}",
-    );
-}
-
-// ---------------------------------------------------------------------------
-// Test 7: root_token cascade stops the session
+// Test 6: root_token cascade stops the session
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -406,13 +367,12 @@ async fn root_token_cascade_stops_session() {
     let (ctrl, _, root) = make_controller(
         DiscoveryConfig {
             bucket_interval_secs: 60,
-            default_duration_secs: 0,
             ..default_config()
         },
         in_memory_db(),
     );
 
-    ctrl.start(None).unwrap();
+    ctrl.start().unwrap();
     assert!(ctrl.status().enabled);
 
     root.cancel();
@@ -550,7 +510,7 @@ async fn ipc_discovery_start_stop_status_roundtrip() {
     assert!(!initial_status, "initial status should be enabled=false");
 
     // Send DiscoveryStart.
-    send_msg(&mut writer, &ClientMessage::DiscoveryStart { duration_secs: Some(60) })
+    send_msg(&mut writer, &ClientMessage::DiscoveryStart)
         .await
         .unwrap();
 
@@ -603,12 +563,12 @@ async fn ipc_discovery_start_stop_status_roundtrip() {
 async fn start_is_idempotent() {
     let (ctrl, _, root) = make_controller(default_config(), in_memory_db());
 
-    ctrl.start(Some(3600)).unwrap();
+    ctrl.start().unwrap();
     let s1 = ctrl.status();
     assert!(s1.enabled);
     let started_at = s1.started_at;
 
-    ctrl.start(Some(3600)).unwrap(); // second call — should be ignored
+    ctrl.start().unwrap(); // second call — should be ignored
     let s2 = ctrl.status();
     assert!(s2.enabled, "still enabled after second start()");
     assert_eq!(

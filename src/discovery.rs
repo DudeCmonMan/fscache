@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use arc_swap::ArcSwapOption;
 use dashmap::{DashMap, DashSet};
@@ -27,7 +27,6 @@ impl OpKind {
 pub struct DiscoveryStatus {
     pub enabled: bool,
     pub started_at: Option<i64>,
-    pub auto_stop_at: Option<i64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -117,17 +116,12 @@ impl DiscoveryController {
         session.bump(&name, op);
     }
 
-    pub fn start(self: &Arc<Self>, duration_secs: Option<u64>) -> anyhow::Result<()> {
+    pub fn start(self: &Arc<Self>) -> anyhow::Result<()> {
         let _guard = self.start_stop.lock().unwrap();
 
         if self.enabled.load(Ordering::Relaxed) {
             return Ok(());  // already running
         }
-
-        let duration = duration_secs
-            .or(Some(self.config.default_duration_secs))
-            .filter(|&s| s > 0)
-            .map(Duration::from_secs);
 
         let child_token = self.root_token.child_token();
         let now = now_unix_sec() as i64;
@@ -141,7 +135,6 @@ impl DiscoveryController {
             pid_lru: Arc::new(Mutex::new(LruCache::new(lru_cap))),
             blocklist: Arc::clone(&self.blocklist),
             started_at: now,
-            auto_stop_at: duration.map(|d| now + d.as_secs() as i64),
         });
 
         self.session.store(Some(Arc::clone(&session)));
@@ -153,22 +146,13 @@ impl DiscoveryController {
         let ctrl = Arc::clone(self);
         tokio::spawn(async move {
             drain_loop(session, db, bucket_secs, ipc_tx).await;
-            // Auto-stop sets enabled=false and clears session via controller reference.
             ctrl.enabled.store(false, Ordering::Release);
             ctrl.session.store(None);
             ctrl.broadcast_status();
         });
 
-        if let Some(stop_at) = duration {
-            let token = child_token.clone();
-            tokio::spawn(async move {
-                tokio::time::sleep(stop_at).await;
-                token.cancel();
-            });
-        }
-
         self.broadcast_status();
-        tracing::info!("discovery: armed (auto-stop: {:?})", duration);
+        tracing::info!("discovery: armed");
         Ok(())
     }
 
@@ -192,7 +176,6 @@ impl DiscoveryController {
         DiscoveryStatus {
             enabled: self.enabled.load(Ordering::Relaxed),
             started_at: session.as_ref().map(|s| s.started_at),
-            auto_stop_at: session.as_ref().and_then(|s| s.auto_stop_at),
         }
     }
 
@@ -201,7 +184,6 @@ impl DiscoveryController {
         let _ = self.ipc_tx.send(DaemonMessage::Event(TelemetryEvent::DiscoveryStatus {
             enabled: s.enabled,
             started_at: s.started_at,
-            auto_stop_at: s.auto_stop_at,
         }));
     }
 }
@@ -214,7 +196,6 @@ struct Session {
     pid_lru: Arc<Mutex<LruCache<u32, Arc<ProcessInfo>>>>,
     blocklist: Arc<Vec<String>>,
     started_at: i64,
-    auto_stop_at: Option<i64>,
 }
 
 impl Session {
@@ -252,28 +233,17 @@ async fn drain_loop(
     session: Arc<Session>,
     db: Arc<CacheDb>,
     bucket_interval_secs: u64,
-    ipc_tx: tokio::sync::broadcast::Sender<DaemonMessage>,
+    _ipc_tx: tokio::sync::broadcast::Sender<DaemonMessage>,
 ) {
-    let interval = Duration::from_secs(bucket_interval_secs.max(1));
+    let interval = tokio::time::Duration::from_secs(bucket_interval_secs.max(1));
     let mut ticker = tokio::time::interval(interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     ticker.tick().await; // consume immediate first tick
-
-    let mut heartbeat = tokio::time::interval(Duration::from_secs(30));
-    heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-    heartbeat.tick().await;
 
     loop {
         tokio::select! {
             _ = ticker.tick() => {
                 flush_bucket(&session, Arc::clone(&db)).await;
-            }
-            _ = heartbeat.tick() => {
-                let _ = ipc_tx.send(DaemonMessage::Event(TelemetryEvent::DiscoveryStatus {
-                    enabled: true,
-                    started_at: Some(session.started_at),
-                    auto_stop_at: session.auto_stop_at,
-                }));
             }
             _ = session.child_token.cancelled() => {
                 flush_bucket(&session, Arc::clone(&db)).await;
@@ -335,7 +305,7 @@ fn emit_new(
     let blk = if blocked { "*" } else { "-" };
     let anc_str = if ancestors.is_empty() { String::new() } else { format!(" anc={ancestors}") };
     let cmd_str = if cmdline.is_empty() { String::new() } else { format!(" cmd={cmdline:?}") };
-    tracing::info!(
+    tracing::debug!(
         target: "fscache::discovery",
         "{now}  NEW     {name:<32}  {blk}     -      -      -       -  pid=?{anc_str}{cmd_str}"
     );
@@ -354,7 +324,7 @@ fn emit_snap(by_process: &std::collections::HashMap<&str, [u64; 3]>) {
         let miss = counts[1];
         let meta = counts[2];
         let total = hit + miss + meta;
-        tracing::info!(
+        tracing::debug!(
             target: "fscache::discovery",
             "{now}  SNAP    {name:<32}  -  {hit:>6}  {miss:>6}  {meta:>6}  {total:>8}",
         );

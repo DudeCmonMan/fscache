@@ -316,8 +316,6 @@ pub struct DiscoveryConfig {
     pub window_days: u64,
     /// How often in-memory counts are flushed to DB and emitted as SNAP log lines.
     pub bucket_interval_secs: u64,
-    /// Default auto-stop duration for `fscache discover start` when --duration is omitted.
-    pub default_duration_secs: u64,
     /// Max entries in the per-session PID info LRU.
     pub pid_lru_capacity: usize,
     /// LRU entry TTL in seconds (guards against PID reuse).
@@ -330,7 +328,6 @@ impl Default for DiscoveryConfig {
             enabled: false,
             window_days: 7,
             bucket_interval_secs: 60,
-            default_duration_secs: 3600,
             pid_lru_capacity: 512,
             pid_lru_ttl_secs: 300,
         }

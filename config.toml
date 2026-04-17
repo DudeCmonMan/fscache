@@ -91,6 +91,5 @@ repeat_log_window_secs = 300             # Suppress repeated access logs for the
 enabled = false                          # Arm at daemon startup. Use `fscache discover start/stop` for runtime control.
 window_days = 7                          # Retain DB rows and log files for this many days
 bucket_interval_secs = 60               # Flush in-memory counts to DB and emit SNAP lines this often (minimum 1)
-default_duration_secs = 3600            # Auto-stop after this many seconds when --duration is omitted from `discover start` (0 = no auto-stop)
 pid_lru_capacity = 512                   # Max PIDs to cache per session — avoids repeated /proc reads for short-lived processes
 pid_lru_ttl_secs = 300                  # Evict PID cache entries older than this (guards against PID reuse)

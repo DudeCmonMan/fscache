@@ -119,14 +119,13 @@ async fn handle_client(
         }
     }
 
-    // Send current discovery state so watch clients get immediate status.
+    // Send current discovery state so connecting clients get immediate status.
     {
         let s = discovery.status();
         let _ = send_msg(&mut writer, &DaemonMessage::Event(
             crate::ipc::protocol::TelemetryEvent::DiscoveryStatus {
                 enabled: s.enabled,
                 started_at: s.started_at,
-                auto_stop_at: s.auto_stop_at,
             }
         )).await;
     }
@@ -188,8 +187,8 @@ async fn handle_client(
                             );
                         }
                     }
-                    Some(ClientMessage::DiscoveryStart { duration_secs }) => {
-                        if let Err(e) = discovery.start(duration_secs) {
+                    Some(ClientMessage::DiscoveryStart) => {
+                        if let Err(e) = discovery.start() {
                             tracing::warn!("IPC discovery start failed: {e}");
                         }
                     }

@@ -63,20 +63,11 @@ enum Command {
 
 #[derive(Subcommand, Debug)]
 enum DiscoverAction {
-    /// Start recording process activity
-    Start {
-        /// Auto-stop duration (e.g. "1h", "30m"). Omit to use configured default.
-        #[arg(long)]
-        duration: Option<String>,
-        /// Record indefinitely, overriding any configured auto-stop duration
-        #[arg(long)]
-        indefinite: bool,
-    },
+    /// Start recording process activity (ad-hoc; does not persist across daemon restarts)
+    Start,
     /// Stop recording
     Stop,
-    /// Show current recording status
-    Status,
-    /// Query historical process access data (reads DB directly — daemon optional)
+    /// Show recording status and historical process access data
     Stat {
         /// Lookback window (e.g. "5m", "1h", "24h"). Default: 1h
         window: Option<String>,
@@ -124,8 +115,10 @@ async fn run_daemon(config_path: Option<PathBuf>) -> anyhow::Result<()> {
         = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
 
     let console_filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(&config.logging.console_level));
-    let file_filter = tracing_subscriber::EnvFilter::new(&config.logging.file_level);
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(&config.logging.console_level))
+        .add_directive("fscache::discovery=off".parse().unwrap());
+    let file_filter = tracing_subscriber::EnvFilter::new(&config.logging.file_level)
+        .add_directive("fscache::discovery=off".parse().unwrap());
 
     std::fs::create_dir_all(&config.logging.log_directory).ok();
     let file_appender = tracing_appender::rolling::daily(&config.logging.log_directory, "fscache.log");
@@ -171,7 +164,7 @@ async fn run_daemon(config_path: Option<PathBuf>) -> anyhow::Result<()> {
                 .event_format(discovery::DiscoveryFormatter)
                 .with_filter(
                     tracing_subscriber::filter::Targets::new()
-                        .with_target("fscache::discovery", tracing::Level::INFO)
+                        .with_target("fscache::discovery", tracing::Level::DEBUG)
                 ),
         )
         .init();
@@ -242,7 +235,7 @@ async fn run_daemon(config_path: Option<PathBuf>) -> anyhow::Result<()> {
     );
 
     if config.discovery.enabled {
-        if let Err(e) = discovery_ctrl.start(None) {
+        if let Err(e) = discovery_ctrl.start() {
             tracing::warn!("discovery auto-arm failed: {e}");
         }
     }
@@ -613,122 +606,113 @@ async fn run_discover(
     action: DiscoverAction,
 ) -> anyhow::Result<()> {
     use ipc::protocol::ClientMessage;
-
-    if let DiscoverAction::Stat { window, kind, top } = action {
-        // Direct DB read — no daemon connection needed.
-        let name = resolve_instance_name(instance).await?;
-        let db_path = std::path::PathBuf::from(format!("/var/lib/fscache/db/{name}.db"));
-        let db = cache::db::CacheDb::open_readonly(&db_path)
-            .map_err(|e| anyhow::anyhow!("failed to open DB {}: {e}", db_path.display()))?;
-
-        let window_secs = if let Some(w) = &window {
-            humantime::parse_duration(w)
-                .map_err(|e| anyhow::anyhow!("invalid window {:?}: {e}", w))?
-                .as_secs()
-        } else {
-            3600
-        };
-        let cutoff = discovery::now_unix_sec() as i64 - window_secs as i64;
-        let rows = db.top_processes(cutoff, kind.as_deref(), top)?;
-
-        let win_str = window.as_deref().unwrap_or("1h");
-        println!("{:<32}  {:>8}  {:>8}  {:>8}  {:>8}", "PROCESS", "HIT", "MISS", "META", "TOTAL");
-        println!("{}", "-".repeat(72));
-        if rows.is_empty() {
-            println!("(no data in the last {win_str})");
-        }
-        for row in &rows {
-            println!("{:<32}  {:>8}  {:>8}  {:>8}  {:>8}",
-                row.process_name, row.hit, row.miss, row.meta, row.total);
-        }
-        return Ok(());
-    }
-
-    let socket = resolve_socket(instance, None).await?;
-    let (_hello, mut reader, mut writer) = ipc::client::connect(&socket).await?;
-
     match action {
-        DiscoverAction::Status => {
-            print_discovery_status(&mut reader).await?;
-        }
-        DiscoverAction::Start { duration, indefinite } => {
-            let duration_secs = if indefinite {
-                Some(0u64)
-            } else if let Some(d) = &duration {
-                Some(
-                    humantime::parse_duration(d)
-                        .map_err(|e| anyhow::anyhow!("invalid duration {:?}: {e}", d))?
-                        .as_secs(),
-                )
-            } else {
-                None
-            };
-            // Consume the initial DiscoveryStatus sent on connect before sending command.
-            drain_to_discovery_status(&mut reader).await?;
-            ipc::send_msg(&mut writer, &ClientMessage::DiscoveryStart { duration_secs }).await?;
-            print_discovery_status(&mut reader).await?;
-        }
-        DiscoverAction::Stop => {
-            drain_to_discovery_status(&mut reader).await?;
-            ipc::send_msg(&mut writer, &ClientMessage::DiscoveryStop).await?;
-            print_discovery_status(&mut reader).await?;
-        }
-        DiscoverAction::Stat { .. } => unreachable!(),
+        DiscoverAction::Stat { window, kind, top } => run_stat(instance, window, kind, top).await,
+        DiscoverAction::Start => run_toggle(instance, ClientMessage::DiscoveryStart).await,
+        DiscoverAction::Stop  => run_toggle(instance, ClientMessage::DiscoveryStop).await,
     }
+}
 
+fn format_recording(enabled: bool, started_at: Option<i64>) -> String {
+    if !enabled {
+        return "Recording: off".to_string();
+    }
+    let Some(at) = started_at else {
+        return "Recording: on".to_string();
+    };
+    let secs = (discovery::now_unix_sec() as i64 - at).max(0) as u64;
+    let dur = std::time::Duration::from_secs(secs);
+    format!("Recording: on (started {} ago)", humantime::format_duration(dur))
+}
+
+/// Best-effort live status from the daemon. Never fails — returns an
+/// "unknown" string if the daemon isn't reachable.
+async fn fetch_recording_line(instance: Option<String>) -> String {
+    let Ok(socket) = resolve_socket(instance, None).await else {
+        return "Recording: unknown (daemon not running)".to_string();
+    };
+    let Ok((_hello, mut reader, _writer)) = ipc::client::connect(&socket).await else {
+        return "Recording: unknown (daemon not running)".to_string();
+    };
+    match recv_discovery_status(&mut reader).await {
+        Ok((enabled, started_at)) => format_recording(enabled, started_at),
+        Err(_) => "Recording: unknown".to_string(),
+    }
+}
+
+async fn run_stat(
+    instance: Option<String>,
+    window: Option<String>,
+    kind: Option<String>,
+    top: usize,
+) -> anyhow::Result<()> {
+    let recording_line = fetch_recording_line(instance.clone()).await;
+
+    // Historical data still works when the daemon is offline.
+    let Ok(name) = resolve_instance_name(instance).await else {
+        println!("{recording_line}");
+        return Ok(());
+    };
+
+    let db_path = std::path::PathBuf::from(format!("/var/lib/fscache/db/{name}.db"));
+    let db = cache::db::CacheDb::open_readonly(&db_path)
+        .map_err(|e| anyhow::anyhow!("failed to open DB {}: {e}", db_path.display()))?;
+
+    let window_secs = match &window {
+        Some(w) => humantime::parse_duration(w)
+            .map_err(|e| anyhow::anyhow!("invalid window {:?}: {e}", w))?
+            .as_secs(),
+        None => 3600,
+    };
+    let cutoff = discovery::now_unix_sec() as i64 - window_secs as i64;
+    let rows = db.top_processes(cutoff, kind.as_deref(), top)?;
+    let win_str = window.as_deref().unwrap_or("1h");
+
+    println!("{recording_line}");
+    println!("Window: last {win_str}");
+    println!();
+    println!("{:<32}  {:>8}  {:>8}  {:>8}  {:>8}", "PROCESS", "HIT", "MISS", "META", "TOTAL");
+    println!("{}", "-".repeat(72));
+    if rows.is_empty() {
+        println!("(no data in the last {win_str})");
+    }
+    for row in &rows {
+        println!("{:<32}  {:>8}  {:>8}  {:>8}  {:>8}",
+            row.process_name, row.hit, row.miss, row.meta, row.total);
+    }
     Ok(())
 }
 
-/// Drain incoming messages until the first DiscoveryStatus is received, then print it.
-async fn print_discovery_status(reader: &mut ipc::IpcFramedReader) -> anyhow::Result<()> {
+async fn run_toggle(
+    instance: Option<String>,
+    msg: ipc::protocol::ClientMessage,
+) -> anyhow::Result<()> {
+    let socket = resolve_socket(instance, None).await?;
+    let (_hello, mut reader, mut writer) = ipc::client::connect(&socket).await?;
+    recv_discovery_status(&mut reader).await?; // consume initial status sent on connect
+    ipc::send_msg(&mut writer, &msg).await?;
+    let (enabled, started_at) = recv_discovery_status(&mut reader).await?;
+    println!("{}", format_recording(enabled, started_at));
+    Ok(())
+}
+
+/// Read messages until the first `DiscoveryStatus` event; return `(enabled, started_at)`.
+async fn recv_discovery_status(
+    reader: &mut ipc::IpcFramedReader,
+) -> anyhow::Result<(bool, Option<i64>)> {
     use ipc::protocol::{DaemonMessage, TelemetryEvent};
     use tokio::time::{timeout, Duration};
     loop {
         match timeout(Duration::from_secs(3), ipc::recv_msg::<DaemonMessage>(reader)).await {
             Ok(Ok(Some(DaemonMessage::Event(TelemetryEvent::DiscoveryStatus {
-                enabled, started_at, auto_stop_at,
-            })))) => {
-                let state = if enabled { "armed" } else { "disarmed" };
-                println!("Discovery: {state}");
-                if let Some(at) = started_at {
-                    let elapsed = discovery::now_unix_sec() as i64 - at;
-                    println!("  Started: {}s ago", elapsed.max(0));
-                }
-                if let Some(stop) = auto_stop_at {
-                    let remaining = stop - discovery::now_unix_sec() as i64;
-                    if remaining > 0 {
-                        println!("  Auto-stop in: {}s", remaining);
-                    } else {
-                        println!("  Auto-stop: expired");
-                    }
-                }
-                return Ok(());
-            }
+                enabled, started_at,
+            })))) => return Ok((enabled, started_at)),
             Ok(Ok(Some(DaemonMessage::Goodbye))) | Ok(Ok(None)) => {
                 anyhow::bail!("daemon disconnected before sending DiscoveryStatus");
             }
             Ok(Ok(Some(_))) => {} // skip Hello, Log, other Event variants
             Ok(Err(e)) => return Err(e),
             Err(_) => anyhow::bail!("timed out waiting for discovery status from daemon"),
-        }
-    }
-}
-
-/// Consume messages until the first DiscoveryStatus (discards it — used before sending a command).
-async fn drain_to_discovery_status(reader: &mut ipc::IpcFramedReader) -> anyhow::Result<()> {
-    use ipc::protocol::{DaemonMessage, TelemetryEvent};
-    use tokio::time::{timeout, Duration};
-    loop {
-        match timeout(Duration::from_secs(3), ipc::recv_msg::<DaemonMessage>(reader)).await {
-            Ok(Ok(Some(DaemonMessage::Event(TelemetryEvent::DiscoveryStatus { .. })))) => {
-                return Ok(());
-            }
-            Ok(Ok(Some(DaemonMessage::Goodbye))) | Ok(Ok(None)) => {
-                anyhow::bail!("connection closed before DiscoveryStatus");
-            }
-            Ok(Ok(Some(_))) => {}
-            Ok(Err(e)) => return Err(e),
-            Err(_) => anyhow::bail!("timed out waiting for initial discovery status"),
         }
     }
 }
@@ -740,17 +724,38 @@ async fn resolve_instance_name(instance: Option<String>) -> anyhow::Result<Strin
     }
     let found = ipc::client::discover().await;
     match found.len() {
-        0 => anyhow::bail!(
-            "No running fscache instances found. \
-             Use --instance to specify one by name."
-        ),
-        1 => Ok(found[0].0.clone()),
-        _ => {
+        1 => return Ok(found[0].0.clone()),
+        n if n > 1 => {
             let names: Vec<_> = found.iter().map(|(n, _)| n.as_str()).collect();
             anyhow::bail!(
-                "Multiple instances running: {}. Use --instance to specify one.",
+                "Multiple instances running: {}. Use -i INSTANCE to specify one.",
                 names.join(", ")
             )
         }
+        _ => {}
+    }
+    // Daemon not running — scan the DB directory for a single known instance.
+    let db_dir = std::path::Path::new("/var/lib/fscache/db");
+    let mut names: Vec<String> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(db_dir) {
+        for entry in entries.flatten() {
+            let p = entry.path();
+            if p.extension().and_then(|e| e.to_str()) == Some("db") {
+                if let Some(stem) = p.file_stem().and_then(|s| s.to_str()) {
+                    names.push(stem.to_string());
+                }
+            }
+        }
+    }
+    match names.len() {
+        0 => anyhow::bail!(
+            "No running fscache instances and no DB files found. \
+             Use -i INSTANCE to specify one by name."
+        ),
+        1 => Ok(names.remove(0)),
+        _ => anyhow::bail!(
+            "Multiple DB files found: {}. Use -i INSTANCE to specify one.",
+            names.join(", ")
+        ),
     }
 }

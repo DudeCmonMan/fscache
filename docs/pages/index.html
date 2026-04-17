@@ -735,6 +735,7 @@ footer a:hover { color: var(--text); }
   <div class="nav-section">
     <div class="nav-section-title">Reference</div>
     <a href="#monitor" class="nav-link"><span class="dot"></span> Monitor GUI</a>
+    <a href="#discovery" class="nav-link"><span class="dot"></span> Discovery Mode</a>
     <a href="#principles" class="nav-link"><span class="dot"></span> Design Principles</a>
     <a href="#safety" class="nav-link"><span class="dot"></span> Safety Warning</a>
   </div>
@@ -1156,6 +1157,75 @@ sudo cp target/release/fscache /usr/local/bin/</code><span class="label">bash</s
     <div class="callout info" style="margin-top:16px;">
       <div class="callout-icon">i</div>
       <div>More features are planned for the monitor — this is the starting set.</div>
+    </div>
+  </div>
+
+  <!-- DISCOVERY -->
+  <div class="section">
+    <span class="section-anchor" id="discovery"></span>
+    <h2>Discovery Mode</h2>
+    <p>
+      Discovery mode answers one question: <strong>which processes are actually touching my files?</strong> While armed, every FUSE metadata op and <code>open()</code> is attributed to the calling process. Counts are aggregated in memory, flushed to the cache DB on a fixed interval, and also written as human-readable <code>NEW</code> / <code>SNAP</code> lines to a dedicated rotating log at <code>{log_directory}/{instance_name}-discovery.log</code>.
+    </p>
+    <p>
+      It's <strong>off by default</strong> and safe to flip on and off at runtime — no restart needed. Useful for tuning <code>process_blocklist</code>, spotting unexpected scanners, or just sanity-checking what Plex (or anything else) is hitting your mount.
+    </p>
+
+    <h3>Quickstart</h3>
+    <p>Arm it for the configured default duration (1h unless you change <code>default_duration_secs</code>):</p>
+    <pre><code>./fscache discover start</code><span class="label">bash</span></pre>
+
+    <p>Arm with an explicit window, or indefinitely:</p>
+    <pre><code>./fscache discover start --duration 10m
+./fscache discover start --duration 2h
+./fscache discover start --indefinite     <span class="c-cmt"># no auto-stop</span></code><span class="label">bash</span></pre>
+
+    <p>Stop early, or check what's currently armed:</p>
+    <pre><code>./fscache discover stop
+./fscache discover status</code><span class="label">bash</span></pre>
+
+    <p>
+      Query historical data from the DB — this works whether discovery is currently armed or not, and does not require a live daemon connection (it reads the DB directly):
+    </p>
+    <pre><code>./fscache discover stat                   <span class="c-cmt"># last 1h, all op kinds</span>
+./fscache discover stat 24h               <span class="c-cmt"># last 24 hours</span>
+./fscache discover stat 15m --kind miss   <span class="c-cmt"># only cache misses</span>
+./fscache discover stat 7d --top 50       <span class="c-cmt"># top 50 over a week</span></code><span class="label">bash</span></pre>
+
+    <p>Output is a simple table:</p>
+    <pre><code>PROCESS                               HIT      MISS      META     TOTAL
+------------------------------------------------------------------------
+Plex Media Server                    4312        18      9021     13351
+Plex Media Scanner                      0         0      7410      7410
+Plex Transcoder                       412         2        83       497</code><span class="label">output</span></pre>
+
+    <div class="callout tip">
+      <div class="callout-icon">✓</div>
+      <div>You can also set <code>[discovery] enabled = true</code> in <code>config.toml</code> to arm discovery automatically on daemon startup.</div>
+    </div>
+
+    <h3>Performance</h3>
+    <div class="callout info">
+      <div class="callout-icon">i</div>
+      <div>
+        The performance hit is <strong>very, very minor — basically impossible to measure in practice</strong>. The hot path stays lock-free via a thread-local PID cache; a non-cached PID lookup is on the order of tens of microseconds (one <code>/proc</code> read) and every subsequent op on that PID is a branch and an atomic increment. With caching enabled, the user-visible latency of a cache hit dwarfs any discovery overhead by orders of magnitude. Turn it on and off at your leisure.
+      </div>
+    </div>
+
+    <h3>Settings</h3>
+    <p>For most users only <code>enabled</code> and <code>window_days</code> matter — the rest is advanced tuning.</p>
+    <div class="table-wrap">
+    <table>
+      <thead><tr><th>Setting</th><th>Default</th><th>Description</th></tr></thead>
+      <tbody>
+        <tr><td><code>discovery.enabled</code></td><td><code>false</code></td><td>Arm at daemon startup. Use <code>discover start/stop</code> for runtime control.</td></tr>
+        <tr><td><code>discovery.window_days</code></td><td><code>7</code></td><td>Retain DB rows and discovery log files for this many days</td></tr>
+        <tr><td><code>discovery.bucket_interval_secs</code></td><td><code>60</code></td><td>How often in-memory counts are flushed to the DB (and SNAP lines emitted)</td></tr>
+        <tr><td><code>discovery.default_duration_secs</code></td><td><code>3600</code></td><td>Auto-stop after this many seconds when <code>--duration</code> is omitted (0 = no auto-stop)</td></tr>
+        <tr><td><code>discovery.pid_lru_capacity</code></td><td><code>512</code></td><td>Max PIDs cached per session — avoids repeated <code>/proc</code> reads</td></tr>
+        <tr><td><code>discovery.pid_lru_ttl_secs</code></td><td><code>300</code></td><td>Evict PID cache entries older than this (guards against PID reuse)</td></tr>
+      </tbody>
+    </table>
     </div>
   </div>
 

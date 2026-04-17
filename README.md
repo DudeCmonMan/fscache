@@ -357,3 +357,79 @@ Scrollable ring buffer of the 200 most recent daemon log lines, color-coded by l
 <td><img width="758" height="822" alt="image" src="https://github.com/user-attachments/assets/c149cec9-6992-4323-91a8-fe4e80aeea74" /></td>
 </tr>
 </table>
+
+---
+
+## Discovery mode
+
+Discovery mode answers one question: *which processes are actually touching my files?* While armed, every FUSE metadata op and open() is attributed to the calling process. Counts are aggregated in memory, flushed to the cache DB on a fixed interval, and also written as human-readable `NEW` / `SNAP` lines to a dedicated rotating log at `{log_directory}/{instance_name}-discovery.log`.
+
+It's **off by default** and safe to flip on and off at runtime — no restart needed. Useful for tuning `process_blocklist`, spotting unexpected scanners, or just sanity-checking what Plex (or anything else) is hitting your mount.
+
+### Quickstart
+
+Arm it for the configured default duration (1h unless you change `default_duration_secs`):
+
+```bash
+./fscache discover start
+```
+
+Arm with an explicit window:
+
+```bash
+./fscache discover start --duration 10m
+./fscache discover start --duration 2h
+./fscache discover start --indefinite     # no auto-stop
+```
+
+Stop early:
+
+```bash
+./fscache discover stop
+```
+
+Check what's currently armed:
+
+```bash
+./fscache discover status
+```
+
+Query historical data from the DB — this works whether discovery is currently armed or not, and does not require a live daemon connection (it reads the DB directly):
+
+```bash
+./fscache discover stat                   # last 1h, all op kinds
+./fscache discover stat 24h               # last 24 hours
+./fscache discover stat 15m --kind miss   # only cache misses
+./fscache discover stat 7d --top 50       # top 50 processes over a week
+```
+
+Output is a simple table:
+
+```
+PROCESS                               HIT      MISS      META     TOTAL
+------------------------------------------------------------------------
+Plex Media Server                    4312        18      9021     13351
+Plex Media Scanner                      0         0      7410      7410
+Plex Transcoder                       412         2        83       497
+```
+
+You can also enable it to arm automatically at daemon startup via `[discovery] enabled = true` in `config.toml`.
+
+### Performance
+
+The performance hit is **very, very minor — basically impossible to measure in practice**. The hot path stays lock-free via a thread-local PID cache; a non-cached PID lookup is on the order of tens of microseconds (one `/proc` read) and every subsequent op on that PID is a branch and an atomic increment. With caching enabled, the user-visible latency of a cache hit dwarfs any discovery overhead by orders of magnitude.
+
+Turn it on and off at your leisure. I can't stress enough how negligible the cost is, especially relative to the IO savings the cache itself provides.
+
+### Settings
+
+See the `[discovery]` section in `config.toml`. For most users only `enabled` and `window_days` matter — the rest is advanced tuning.
+
+| Setting | Default | Description |
+|---|---|---|
+| `discovery.enabled` | `false` | Arm at daemon startup. Use `discover start/stop` for runtime control. |
+| `discovery.window_days` | `7` | Retain DB rows and discovery log files for this many days |
+| `discovery.bucket_interval_secs` | `60` | How often in-memory counts are flushed to the DB (and SNAP lines emitted) |
+| `discovery.default_duration_secs` | `3600` | Auto-stop after this many seconds when `--duration` is omitted from `discover start` (0 = no auto-stop) |
+| `discovery.pid_lru_capacity` | `512` | Max PIDs cached per session — avoids repeated `/proc` reads |
+| `discovery.pid_lru_ttl_secs` | `300` | Evict PID cache entries older than this (guards against PID reuse) |

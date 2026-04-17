@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, UNIX_EPOCH};
 
 use crate::backing_store::BackingStore;
+use crate::discovery::{DiscoveryController, OpKind};
 use crate::preset::{CachePreset, ProcessInfo};
 use crate::telemetry;
 
@@ -32,7 +33,7 @@ const TTL: Duration = Duration::from_secs(1);
 /// They overlap but are not equivalent (e.g. PlexEpisodePrediction also filters
 /// Plex Transcoder via cmdline inspection, independent of the blocklist).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum OpenOutcome {
+pub enum OpenOutcome {
     /// Served from the SSD cache.
     Hit,
     /// Served from the backing store; eligible for caching by the action engine.
@@ -52,6 +53,7 @@ pub struct FsCache {
     pub repeat_log_window: Duration,
     /// Optional preset that controls open-time filtering and future caching actions.
     pub preset: Option<Arc<dyn CachePreset>>,
+    pub discovery: Option<Arc<DiscoveryController>>,
     recent_logs: Mutex<HashMap<PathBuf, std::time::Instant>>,
     /// Bytes read per open file handle — emitted as telemetry on release.
     open_bytes: Mutex<HashMap<u64, u64>>,
@@ -85,6 +87,7 @@ impl FsCache {
             access_tx: None,
             repeat_log_window: Duration::from_secs(60),
             preset: None,
+            discovery: None,
             recent_logs: Mutex::new(HashMap::new()),
             open_bytes: Mutex::new(HashMap::new()),
             open_paths: Mutex::new(HashMap::new()),
@@ -318,7 +321,7 @@ impl Filesystem for FsCache {
         tracing::info!("FUSE filesystem destroyed");
     }
 
-    fn lookup(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
+    fn lookup(&self, req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
         let parent_path = match self.inodes.lock().unwrap().get_path(parent.0) {
             Some(p) => p.to_path_buf(),
             None => { reply.error(Errno::ENOENT); return; }
@@ -335,6 +338,8 @@ impl Filesystem for FsCache {
             return;
         };
 
+        if let Some(ref d) = self.discovery { d.log_touch(req.pid(), OpKind::Meta); }
+
         let ino = self.inodes.lock().unwrap().get_or_create(&child_path);
         let attr = self.stat_to_attr(ino, &stat);
         reply.entry(&TTL, &attr, Generation(0));
@@ -344,7 +349,7 @@ impl Filesystem for FsCache {
         self.inodes.lock().unwrap().forget(ino.0, nlookup);
     }
 
-    fn getattr(&self, _req: &Request, ino: INodeNo, _fh: Option<FileHandle>, reply: ReplyAttr) {
+    fn getattr(&self, req: &Request, ino: INodeNo, _fh: Option<FileHandle>, reply: ReplyAttr) {
         let path = match self.inodes.lock().unwrap().get_path(ino.0) {
             Some(p) => p.to_path_buf(),
             None => { reply.error(Errno::ENOENT); return; }
@@ -353,6 +358,7 @@ impl Filesystem for FsCache {
             reply.error(Errno::ENOENT);
             return;
         };
+        if let Some(ref d) = self.discovery { d.log_touch(req.pid(), OpKind::Meta); }
         reply.attr(&TTL, &self.stat_to_attr(ino.0, &stat));
     }
 
@@ -369,10 +375,17 @@ impl Filesystem for FsCache {
 
         let suppress = self.should_suppress_log(&path);
 
+        // Capture process info when preset or discovery needs it.
+        let process = if self.preset.is_some() || self.discovery.is_some() {
+            Some(ProcessInfo::capture(req.pid()))
+        } else {
+            None
+        };
+
         let (filtered, opener_name) = if let Some(ref preset) = self.preset {
-            let process = ProcessInfo::capture(req.pid());
-            let name = process.name.clone();
-            if preset.should_filter(&process) {
+            let proc = process.as_ref().unwrap();
+            let name = proc.name.clone();
+            if preset.should_filter(proc) {
                 tracing::debug!(
                     "preset filtered pid {} ({}) on {:?}",
                     req.pid(), name.as_deref().unwrap_or("?"), path
@@ -413,7 +426,9 @@ impl Filesystem for FsCache {
 
         self.open_bytes.lock().unwrap().insert(fd as u64, 0);
 
-        // TODO(discovery): self.discovery.as_ref().map(|d| d.log_open(&process, outcome));
+        if let (Some(d), Some(proc)) = (&self.discovery, &process) {
+            d.log_open(proc, outcome);
+        }
 
         reply.opened(FileHandle(fd as u64), FopenFlags::empty());
     }
@@ -472,11 +487,12 @@ impl Filesystem for FsCache {
         reply.ok();
     }
 
-    fn opendir(&self, _req: &Request, ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
+    fn opendir(&self, req: &Request, ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
         let path = match self.inodes.lock().unwrap().get_path(ino.0) {
             Some(p) => p.to_path_buf(),
             None => { reply.error(Errno::ENOENT); return; }
         };
+        if let Some(ref d) = self.discovery { d.log_touch(req.pid(), OpKind::Meta); }
 
         // O_PATH fds can't be used with fdopendir, so always open via openat with real flags.
         // For root, open "." relative to the backing fd.

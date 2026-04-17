@@ -174,6 +174,7 @@ fn apply_event(event: &TelemetryEvent, state: &DashboardState) {
             Some("size_limit") => { state.evictions_size.fetch_add(1, Relaxed); }
             _ => {}
         },
+        TelemetryEvent::DiscoveryStatus { .. } => {}
     }
 }
 

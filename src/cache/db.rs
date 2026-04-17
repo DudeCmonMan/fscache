@@ -50,6 +50,20 @@ impl CacheDb {
                 path        TEXT    NOT NULL,
                 timestamp   INTEGER NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS process_access (
+                bucket_epoch     INTEGER NOT NULL,
+                process_name     TEXT    NOT NULL,
+                op_kind          TEXT    NOT NULL,
+                count            INTEGER NOT NULL,
+                first_seen       INTEGER NOT NULL,
+                last_seen        INTEGER NOT NULL,
+                sample_cmdline   TEXT,
+                sample_ancestors TEXT,
+                PRIMARY KEY (bucket_epoch, process_name, op_kind)
+            ) WITHOUT ROWID;
+            CREATE INDEX IF NOT EXISTS idx_process_access_recency
+                ON process_access (bucket_epoch);
         "#)?;
         // Additive migrations — silently ignored if column already present.
         let _ = conn.execute_batch(
@@ -460,6 +474,119 @@ impl CacheDb {
             "UPDATE cache_files SET last_hit_at = ?1 WHERE rel_path = ?2 AND mount_id = ?3",
             params![timestamp_secs, key.as_ref(), mount_id],
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Process discovery: row types + methods
+// ---------------------------------------------------------------------------
+
+pub struct ProcessAccessRow {
+    pub bucket_epoch: i64,
+    pub process_name: String,
+    pub op_kind: String,
+    pub count: u64,
+    pub sample_cmdline: Option<String>,
+    pub sample_ancestors: Option<String>,
+}
+
+pub struct ProcessSummary {
+    pub process_name: String,
+    pub hit: u64,
+    pub miss: u64,
+    pub meta: u64,
+    pub total: u64,
+    pub first_seen: i64,
+    pub sample_cmdline: Option<String>,
+    pub sample_ancestors: Option<String>,
+}
+
+impl CacheDb {
+    pub fn upsert_process_access(&self, rows: &[ProcessAccessRow]) -> anyhow::Result<()> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare_cached(
+            "INSERT INTO process_access
+                (bucket_epoch, process_name, op_kind, count,
+                 first_seen, last_seen, sample_cmdline, sample_ancestors)
+             VALUES (?1, ?2, ?3, ?4, ?1, ?1, ?5, ?6)
+             ON CONFLICT(bucket_epoch, process_name, op_kind) DO UPDATE SET
+                count            = count + excluded.count,
+                last_seen        = MAX(last_seen, excluded.last_seen),
+                sample_cmdline   = COALESCE(sample_cmdline,   excluded.sample_cmdline),
+                sample_ancestors = COALESCE(sample_ancestors, excluded.sample_ancestors)",
+        )?;
+        for row in rows {
+            stmt.execute(params![
+                row.bucket_epoch,
+                row.process_name,
+                row.op_kind,
+                row.count as i64,
+                row.sample_cmdline,
+                row.sample_ancestors,
+            ])?;
+        }
+        Ok(())
+    }
+
+    pub fn top_processes(
+        &self,
+        since_epoch: i64,
+        kind_filter: Option<&str>,
+        limit: usize,
+    ) -> anyhow::Result<Vec<ProcessSummary>> {
+        let conn = self.conn.lock().unwrap();
+        let mut stmt = conn.prepare(
+            "SELECT process_name,
+                    SUM(CASE WHEN op_kind = 'hit'  THEN count ELSE 0 END),
+                    SUM(CASE WHEN op_kind = 'miss' THEN count ELSE 0 END),
+                    SUM(CASE WHEN op_kind = 'meta' THEN count ELSE 0 END),
+                    SUM(count),
+                    MIN(first_seen),
+                    MAX(sample_cmdline),
+                    MAX(sample_ancestors)
+             FROM process_access
+             WHERE bucket_epoch >= ?1
+             GROUP BY process_name
+             ORDER BY SUM(count) DESC
+             LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![since_epoch, limit as i64], |row| {
+            Ok(ProcessSummary {
+                process_name:     row.get(0)?,
+                hit:              row.get::<_, i64>(1)?.max(0) as u64,
+                miss:             row.get::<_, i64>(2)?.max(0) as u64,
+                meta:             row.get::<_, i64>(3)?.max(0) as u64,
+                total:            row.get::<_, i64>(4)?.max(0) as u64,
+                first_seen:       row.get(5)?,
+                sample_cmdline:   row.get(6)?,
+                sample_ancestors: row.get(7)?,
+            })
+        })?
+        .flatten()
+        .collect::<Vec<_>>();
+
+        if let Some(kind) = kind_filter {
+            let filtered: Vec<_> = rows.into_iter()
+                .filter(|r| match kind {
+                    "hit"  => r.hit  > 0,
+                    "miss" => r.miss > 0,
+                    "meta" => r.meta > 0,
+                    _ => true,
+                })
+                .collect();
+            return Ok(filtered);
+        }
+
+        Ok(rows)
+    }
+
+    pub fn prune_process_access(&self, cutoff_epoch: i64) -> anyhow::Result<usize> {
+        let conn = self.conn.lock().unwrap();
+        let n = conn.execute(
+            "DELETE FROM process_access WHERE bucket_epoch < ?1",
+            params![cutoff_epoch],
+        )?;
+        Ok(n)
     }
 }
 

@@ -21,6 +21,8 @@ pub struct Config {
     pub logging: LoggingConfig,
     #[serde(default)]
     pub invalidation: InvalidationConfig,
+    #[serde(default)]
+    pub discovery: DiscoveryConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -304,6 +306,36 @@ fn default_max_depth() -> usize { 3 }
 fn default_poll_interval_secs() -> u64 { 300 }
 fn default_check_on_hit() -> bool { false }
 fn default_check_on_maintenance() -> bool { true }
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct DiscoveryConfig {
+    /// Arm discovery at daemon startup (runtime toggle via `fscache discover start/stop`).
+    pub enabled: bool,
+    /// Retention window for DB rows and log files in days.
+    pub window_days: u64,
+    /// How often in-memory counts are flushed to DB and emitted as SNAP log lines.
+    pub bucket_interval_secs: u64,
+    /// Default auto-stop duration for `fscache discover start` when --duration is omitted.
+    pub default_duration_secs: u64,
+    /// Max entries in the per-session PID info LRU.
+    pub pid_lru_capacity: usize,
+    /// LRU entry TTL in seconds (guards against PID reuse).
+    pub pid_lru_ttl_secs: u64,
+}
+
+impl Default for DiscoveryConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            window_days: 7,
+            bucket_interval_secs: 60,
+            default_duration_secs: 3600,
+            pid_lru_capacity: 512,
+            pid_lru_ttl_secs: 300,
+        }
+    }
+}
 
 /// Accept both `10` and `10.0` in u64 fields — TOML floats are silently truncated.
 fn de_u64<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u64, D::Error> {

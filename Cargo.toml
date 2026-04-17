@@ -28,6 +28,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2"
 rusqlite = { version = "0.32", features = ["bundled"] }
 regex = "1"
+dashmap = "6"
+lru = "0.12"
+arc-swap = "1"
+humantime = "2"
 ratatui = "0.29"
 crossterm = { version = "0.28", features = ["event-stream"] }
 futures = "0.3"

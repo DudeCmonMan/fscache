@@ -8,6 +8,7 @@ use tokio::time::{timeout, Duration};
 use tokio_util::sync::CancellationToken;
 
 use crate::cache::db::CacheDb;
+use crate::discovery::DiscoveryController;
 use super::protocol::{ClientMessage, DaemonMessage, LogLine};
 use super::{framed_split, recv_msg, send_msg};
 
@@ -24,6 +25,7 @@ pub async fn run_ipc_server(
     shutdown: CancellationToken,
     recent: Arc<Mutex<VecDeque<LogLine>>>,
     db: Arc<CacheDb>,
+    discovery: Arc<DiscoveryController>,
 ) -> anyhow::Result<()> {
     // Stale socket detection: if we can connect, another daemon is alive.
     // (Normally impossible since the instance lock prevents this, but be
@@ -56,15 +58,16 @@ pub async fn run_ipc_server(
             accept_result = listener.accept() => {
                 match accept_result {
                     Ok((stream, _)) => {
-                        let hello_clone  = hello.clone();
-                        let mut rx       = events.subscribe();
-                        let sd          = shutdown.clone();
-                        let peer_path    = socket_path.clone();
-                        let recent_clone = Arc::clone(&recent);
-                        let db_clone     = Arc::clone(&db);
+                        let hello_clone     = hello.clone();
+                        let mut rx          = events.subscribe();
+                        let sd              = shutdown.clone();
+                        let peer_path       = socket_path.clone();
+                        let recent_clone    = Arc::clone(&recent);
+                        let db_clone        = Arc::clone(&db);
+                        let discovery_clone = Arc::clone(&discovery);
                         tokio::spawn(async move {
                             let peer = format!("client@{}", peer_path.display());
-                            if let Err(e) = handle_client(stream, hello_clone, &mut rx, sd, recent_clone, db_clone).await {
+                            if let Err(e) = handle_client(stream, hello_clone, &mut rx, sd, recent_clone, db_clone, discovery_clone).await {
                                 tracing::debug!("{peer} disconnected: {e}");
                             } else {
                                 tracing::debug!("{peer} disconnected cleanly");
@@ -99,6 +102,7 @@ async fn handle_client(
     shutdown: CancellationToken,
     recent: Arc<Mutex<VecDeque<LogLine>>>,
     db: Arc<CacheDb>,
+    discovery: Arc<DiscoveryController>,
 ) -> anyhow::Result<()> {
     let (mut reader, mut writer) = framed_split(stream);
 
@@ -113,6 +117,18 @@ async fn handle_client(
         for line in snapshot {
             send_msg(&mut writer, &DaemonMessage::Log(line)).await?;
         }
+    }
+
+    // Send current discovery state so watch clients get immediate status.
+    {
+        let s = discovery.status();
+        let _ = send_msg(&mut writer, &DaemonMessage::Event(
+            crate::ipc::protocol::TelemetryEvent::DiscoveryStatus {
+                enabled: s.enabled,
+                started_at: s.started_at,
+                auto_stop_at: s.auto_stop_at,
+            }
+        )).await;
     }
 
     loop {
@@ -171,6 +187,14 @@ async fn handle_client(
                                 target.mount_id,
                             );
                         }
+                    }
+                    Some(ClientMessage::DiscoveryStart { duration_secs }) => {
+                        if let Err(e) = discovery.start(duration_secs) {
+                            tracing::warn!("IPC discovery start failed: {e}");
+                        }
+                    }
+                    Some(ClientMessage::DiscoveryStop) => {
+                        discovery.stop();
                     }
                     None => return Ok(()), // client closed connection
                 }

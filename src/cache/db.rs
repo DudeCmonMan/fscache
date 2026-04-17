@@ -199,7 +199,6 @@ impl CacheDb {
 
         let conn = self.conn.lock().unwrap();
 
-        // Step 2: purge DB rows that have no corresponding file.
         let db_paths: Vec<String> = {
             let mut stmt = match conn.prepare(
                 "SELECT rel_path FROM cache_files WHERE mount_id = ?1",
@@ -228,7 +227,6 @@ impl CacheDb {
             }
         }
 
-        // Step 3: add disk files not yet in DB (e.g. after a crash mid-commit).
         let on_disk = crate::utils::collect_cache_files(cache_dir);
         let now = now_secs() as i64;
         let mut new_count = 0usize;

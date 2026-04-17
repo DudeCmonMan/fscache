@@ -15,10 +15,6 @@ use crate::fuse::fusefs::OpenOutcome;
 use crate::ipc::protocol::{DaemonMessage, TelemetryEvent};
 use crate::preset::ProcessInfo;
 
-// ---------------------------------------------------------------------------
-// Public types
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OpKind { Hit, Miss, Meta }
 
@@ -41,10 +37,6 @@ pub struct DiscoveryStatus {
 thread_local! {
     static LAST_SEEN: RefCell<Option<(u32, Arc<ProcessInfo>)>> = const { RefCell::new(None) };
 }
-
-// ---------------------------------------------------------------------------
-// DiscoveryController (public, shared via Arc)
-// ---------------------------------------------------------------------------
 
 pub struct DiscoveryController {
     enabled: Arc<AtomicBool>,
@@ -125,10 +117,6 @@ impl DiscoveryController {
         session.bump(&name, op);
     }
 
-    // -----------------------------------------------------------------------
-    // Session lifecycle
-    // -----------------------------------------------------------------------
-
     pub fn start(self: &Arc<Self>, duration_secs: Option<u64>) -> anyhow::Result<()> {
         let _guard = self.start_stop.lock().unwrap();
 
@@ -159,7 +147,6 @@ impl DiscoveryController {
         self.session.store(Some(Arc::clone(&session)));
         self.enabled.store(true, Ordering::Release);
 
-        // Drain task
         let db = Arc::clone(&self.db);
         let bucket_secs = self.config.bucket_interval_secs;
         let ipc_tx = self.ipc_tx.clone();
@@ -172,7 +159,6 @@ impl DiscoveryController {
             ctrl.broadcast_status();
         });
 
-        // Auto-stop timer
         if let Some(stop_at) = duration {
             let token = child_token.clone();
             tokio::spawn(async move {
@@ -219,10 +205,6 @@ impl DiscoveryController {
         }));
     }
 }
-
-// ---------------------------------------------------------------------------
-// Session (private)
-// ---------------------------------------------------------------------------
 
 struct Session {
     child_token: CancellationToken,
@@ -342,10 +324,6 @@ async fn flush_bucket(session: &Session, db: Arc<CacheDb>) {
     let _ = tokio::task::spawn_blocking(move || db.upsert_process_access(&rows)).await;
 }
 
-// ---------------------------------------------------------------------------
-// Log emission
-// ---------------------------------------------------------------------------
-
 fn emit_new(
     _info: &ProcessInfo,
     name: &str,
@@ -382,10 +360,6 @@ fn emit_snap(by_process: &std::collections::HashMap<&str, [u64; 3]>) {
         );
     }
 }
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
 
 fn format_process_info(info: &ProcessInfo) -> (String, String) {
     let cmdline = info.cmdline.as_deref()

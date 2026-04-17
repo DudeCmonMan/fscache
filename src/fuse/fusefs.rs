@@ -375,7 +375,6 @@ impl Filesystem for FsCache {
 
         let suppress = self.should_suppress_log(&path);
 
-        // Capture process info when preset or discovery needs it.
         let process = if self.preset.is_some() || self.discovery.is_some() {
             Some(ProcessInfo::capture(req.pid()))
         } else {

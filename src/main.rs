@@ -222,7 +222,7 @@ async fn run_daemon(config_path: Option<PathBuf>) -> anyhow::Result<()> {
         (config.cache.max_cache_pull_per_mount_gb * 1_073_741_824.0) as u64;
 
     // Shared with all background tasks so any of them (or a signal) can
-    // trigger a clean shutdown. A JoinSet tracks their handles for draining.
+    // trigger a clean shutdown.
     let shutdown_token = tokio_util::sync::CancellationToken::new();
     let mut background: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
 
@@ -284,7 +284,6 @@ async fn run_daemon(config_path: Option<PathBuf>) -> anyhow::Result<()> {
         ).await;
     });
 
-    // Prune old process_access rows on a regular interval.
     {
         let prune_db  = Arc::clone(&db);
         let prune_tok = shutdown_token.clone();
@@ -645,7 +644,6 @@ async fn run_discover(
         return Ok(());
     }
 
-    // IPC dispatch for start / stop / status.
     let socket = resolve_socket(instance, None).await?;
     let (_hello, mut reader, mut writer) = ipc::client::connect(&socket).await?;
 

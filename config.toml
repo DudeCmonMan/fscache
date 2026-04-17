@@ -76,3 +76,21 @@ log_directory = "/var/log/fscache"       # Directory for rolling daily log files
 console_level = "info"                   # Log level for terminal output (error/warn/info/debug/trace)
 file_level = "debug"                     # Log level for log files (captures full detail)
 repeat_log_window_secs = 300             # Suppress repeated access logs for the same file within this window (0 = disabled)
+
+# ---------------------------------------------------------------------------
+# [discovery] — process discovery (which processes touch the FUSE mount)
+# ---------------------------------------------------------------------------
+# Off by default. Arm at runtime with `fscache discover start`,
+# or set enabled = true to arm automatically at daemon startup.
+# While armed, every FUSE metadata op and open() records the calling process.
+# Counts are flushed to the DB every bucket_interval_secs and written as
+# SNAP lines to {log_directory}/{instance_name}-discovery.log.
+# Query with `fscache discover stat [window]` — reads DB directly, no live daemon needed.
+# You really only need to use enabled + window_days, other settings are advanced and probably not applicable.
+[discovery]
+enabled = false                          # Arm at daemon startup. Use `fscache discover start/stop` for runtime control.
+window_days = 7                          # Retain DB rows and log files for this many days
+bucket_interval_secs = 60               # Flush in-memory counts to DB and emit SNAP lines this often (minimum 1)
+default_duration_secs = 3600            # Auto-stop after this many seconds when --duration is omitted from `discover start` (0 = no auto-stop)
+pid_lru_capacity = 512                   # Max PIDs to cache per session — avoids repeated /proc reads for short-lived processes
+pid_lru_ttl_secs = 300                  # Evict PID cache entries older than this (guards against PID reuse)

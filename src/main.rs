@@ -69,7 +69,7 @@ enum DiscoverAction {
     Stop,
     /// Show recording status and historical process access data
     Stat {
-        /// Lookback window (e.g. "5m", "1h", "24h"). Default: 1h
+        /// Lookback window (e.g. "5m", "1h", "24h"). Default: 24h
         window: Option<String>,
         /// Filter by operation kind: hit, miss, or meta
         #[arg(long)]
@@ -662,11 +662,11 @@ async fn run_stat(
         Some(w) => humantime::parse_duration(w)
             .map_err(|e| anyhow::anyhow!("invalid window {:?}: {e}", w))?
             .as_secs(),
-        None => 3600,
+        None => 86400,
     };
     let cutoff = discovery::now_unix_sec() as i64 - window_secs as i64;
     let rows = db.top_processes(cutoff, kind.as_deref(), top)?;
-    let win_str = window.as_deref().unwrap_or("1h");
+    let win_str = window.as_deref().unwrap_or("24h");
 
     println!("{recording_line}");
     println!("Window: last {win_str}");

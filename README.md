@@ -23,7 +23,7 @@ If this utility helped you, I would really appreciate a star!
 
 # WARNING: PLEASE READ THIS BEFORE TRYING
 
-**This is a new project. I HIGHLY recommend you DISABLE automatic trash emptying in Plex while evaluating this software. Filesystem mounting/unmounting is potentially dangerous on a live server. If Plex detects a drive went down and you have automatic trash cleanup enabled, it WILL delete your Plex metadata (not the files — just watch history, ratings, etc.). My codebase has extensive automated testing that protects against this type of failure, but please be safe. If you're using this tool, you're probably hoarding data like me and I would HATE to see a critical bug break your metadata.**
+**I HIGHLY recommend you DISABLE automatic trash emptying in Plex while evaluating this software. Filesystem mounting/unmounting is potentially dangerous on a live server. If Plex detects a drive went down and you have automatic trash cleanup enabled, it WILL delete your Plex metadata (not the files — just db info, watch history, ratings, etc.). My codebase has extensive automated testing that protects against this type of failure, but please be safe. If you're using this tool, you're probably hoarding data like me and I would HATE to see a critical bug break your metadata.**
 
 ---
 

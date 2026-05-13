@@ -59,6 +59,8 @@ pub struct FsCache {
     open_bytes: Mutex<HashMap<u64, u64>>,
     /// Path for each open file handle — used to send on_close events.
     open_paths: Mutex<HashMap<u64, PathBuf>>,
+    /// Handle to the backing-directory inotify watcher. None when feature is disabled.
+    pub backing_watch: Option<crate::backing_watch::BackingWatchHandle>,
 }
 
 impl FsCache {
@@ -91,6 +93,7 @@ impl FsCache {
             recent_logs: Mutex::new(HashMap::new()),
             open_bytes: Mutex::new(HashMap::new()),
             open_paths: Mutex::new(HashMap::new()),
+            backing_watch: None,
         })
     }
 
@@ -341,6 +344,15 @@ impl Filesystem for FsCache {
         if let Some(ref d) = self.discovery { d.log_touch(req.pid(), OpKind::Meta); }
 
         let ino = self.inodes.lock().unwrap().get_or_create(&child_path);
+
+        // Seed the backing watcher for directories so upstream inotify consumers
+        // on the FUSE mount receive events when the backing directory changes.
+        if stat.st_mode & libc::S_IFMT == libc::S_IFDIR {
+            if let Some(ref bw) = self.backing_watch {
+                bw.touch(child_path.clone(), ino);
+            }
+        }
+
         let attr = self.stat_to_attr(ino, &stat);
         reply.entry(&TTL, &attr, Generation(0));
     }

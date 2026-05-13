@@ -16,3 +16,5 @@ pub const EVICTION_REASON_STALE_PERIODIC: &str = "stale_periodic";
 pub const EVENT_DB_INSERT: &str = "db_insert";
 pub const EVENT_DB_REMOVE: &str = "db_remove";
 pub const EVENT_DB_HIT: &str = "db_hit";
+pub const EVENT_BACKING_CHANGED: &str = "backing_changed";
+pub const EVICTION_REASON_BACKING_EVENT: &str = "backing_event";

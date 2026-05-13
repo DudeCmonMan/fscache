@@ -42,6 +42,12 @@ pub struct DashboardState {
     pub evictions_expired: AtomicU64,
     pub evictions_size:    AtomicU64,
 
+    // -- Backing watcher --
+    pub backing_watches_active:    AtomicU64,
+    pub backing_events_handled:    AtomicU64,
+    pub backing_evictions_triggered: AtomicU64,
+    pub backing_watch_cap_reached: AtomicU64,
+
     // -- Scheduler --
     pub caching_allowed: AtomicBool,
 
@@ -80,6 +86,11 @@ impl DashboardState {
 
             evictions_expired: AtomicU64::new(0),
             evictions_size:    AtomicU64::new(0),
+
+            backing_watches_active:      AtomicU64::new(0),
+            backing_events_handled:      AtomicU64::new(0),
+            backing_evictions_triggered: AtomicU64::new(0),
+            backing_watch_cap_reached:   AtomicU64::new(0),
 
             caching_allowed: AtomicBool::new(false),
 

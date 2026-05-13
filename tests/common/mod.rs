@@ -1,12 +1,14 @@
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use fuser::{MountOption, SessionACL};
+use fscache::backing_watch::{BackingWatchHandle, WatchRequest};
 use fscache::cache::io::{CacheIO, CacheIoConfig};
 use fscache::engine::action::{AccessEvent, ActionEngine};
 use fscache::cache::db::CacheDb;
 use fscache::cache::manager::CacheManager;
-use fscache::config::InvalidationConfig;
+use fscache::config::{BackingWatchConfig, InvalidationConfig};
 use fscache::fuse::fusefs::FsCache;
 use fscache::preset::CachePreset;
 use fscache::presets::plex_episode_prediction::PlexEpisodePrediction;
@@ -476,6 +478,154 @@ impl MultiFuseHarness {
 
     pub fn cache_subdir(&self, idx: usize) -> std::path::PathBuf {
         self.shared_cache_base.path().join(idx.to_string())
+    }
+}
+
+/// Harness for backing-watcher E2E tests.
+///
+/// Wires FsCache with a BackingWatchHandle, a real CacheIO pipeline, and spawns
+/// `backing_watch::run` after mounting. Must be created inside `#[tokio::test]`.
+pub struct BackingWatchHarness {
+    pub backing: TempDir,
+    pub mount: TempDir,
+    pub cache: TempDir,
+    pub cache_mgr: Arc<CacheManager>,
+    pub cache_io: CacheIO,
+    /// Configured debounce; use `wait_for_debounce()` in tests.
+    pub debounce_ms: u64,
+    _session: fuser::BackgroundSession,
+    _shutdown: CancellationToken,
+}
+
+impl BackingWatchHarness {
+    /// Create a harness with the backing watcher enabled at the given debounce.
+    /// Use a short debounce (e.g., 100 ms) for tests.
+    pub fn new(debounce_ms: u64) -> anyhow::Result<Self> {
+        let backing = TempDir::new()?;
+        let mount = TempDir::new()?;
+        let cache_dir = TempDir::new()?;
+
+        let (watch_tx, watch_rx) = mpsc::unbounded_channel::<WatchRequest>();
+
+        let mut fs = FsCache::new(backing.path())?;
+        let backing_store = Arc::clone(&fs.backing_store);
+        fs.backing_watch = Some(BackingWatchHandle::new(watch_tx));
+
+        let db = Arc::new(CacheDb::open(&cache_dir.path().join("test.db"))?);
+        let cache_mgr = Arc::new(CacheManager::new(
+            cache_dir.path().to_path_buf(),
+            db,
+            cache_dir.path().to_path_buf(),
+            10.0,
+            72,
+            0.0,
+            Some(Arc::clone(&backing_store)),
+            &InvalidationConfig::default(),
+        ));
+        cache_mgr.startup_cleanup();
+        fs.cache = Some(Arc::clone(&cache_mgr));
+
+        let scheduler = Scheduler::new("00:00", "23:59").unwrap();
+        let shutdown = CancellationToken::new();
+        let (cache_io, _io_handles) = CacheIO::spawn(
+            CacheIoConfig {
+                max_concurrent_copies: 1,
+                eviction_interval_secs: 0,
+                deferred_ttl_minutes: 0,
+            },
+            Arc::clone(&cache_mgr),
+            Arc::clone(&backing_store),
+            scheduler,
+            shutdown.clone(),
+        );
+        let cache_io_for_watcher = cache_io.clone();
+
+        let session = fuser::spawn_mount2(fs, mount.path(), &test_fuse_config())?;
+
+        let notifier = session.notifier();
+        tokio::spawn(fscache::backing_watch::run(
+            watch_rx,
+            notifier,
+            Arc::clone(&backing_store),
+            Arc::clone(&cache_mgr),
+            cache_io_for_watcher,
+            BackingWatchConfig { enabled: true, max_dirs: 64, debounce_ms },
+            shutdown.clone(),
+            "test".to_string(),
+        ));
+
+        Ok(Self {
+            backing,
+            mount,
+            cache: cache_dir,
+            cache_mgr,
+            cache_io,
+            debounce_ms,
+            _session: session,
+            _shutdown: shutdown,
+        })
+    }
+
+    /// Create a harness with the backing watcher disabled (no task spawned, no handle set).
+    /// Use this to verify that backing mutations do not evict cache entries when the
+    /// watcher is off.
+    pub fn new_without_watcher(debounce_ms: u64) -> anyhow::Result<Self> {
+        let backing = TempDir::new()?;
+        let mount = TempDir::new()?;
+        let cache_dir = TempDir::new()?;
+
+        let mut fs = FsCache::new(backing.path())?;
+        let backing_store = Arc::clone(&fs.backing_store);
+        // backing_watch intentionally left as None
+
+        let db = Arc::new(CacheDb::open(&cache_dir.path().join("test.db"))?);
+        let cache_mgr = Arc::new(CacheManager::new(
+            cache_dir.path().to_path_buf(),
+            db,
+            cache_dir.path().to_path_buf(),
+            10.0,
+            72,
+            0.0,
+            Some(Arc::clone(&backing_store)),
+            &InvalidationConfig::default(),
+        ));
+        cache_mgr.startup_cleanup();
+        fs.cache = Some(Arc::clone(&cache_mgr));
+
+        let scheduler = Scheduler::new("00:00", "23:59").unwrap();
+        let shutdown = CancellationToken::new();
+        let (cache_io, _io_handles) = CacheIO::spawn(
+            CacheIoConfig {
+                max_concurrent_copies: 1,
+                eviction_interval_secs: 0,
+                deferred_ttl_minutes: 0,
+            },
+            Arc::clone(&cache_mgr),
+            Arc::clone(&backing_store),
+            scheduler,
+            shutdown.clone(),
+        );
+
+        let session = fuser::spawn_mount2(fs, mount.path(), &test_fuse_config())?;
+
+        Ok(Self {
+            backing,
+            mount,
+            cache: cache_dir,
+            cache_mgr,
+            cache_io,
+            debounce_ms,
+            _session: session,
+            _shutdown: shutdown,
+        })
+    }
+
+    pub fn backing_path(&self) -> &Path { self.backing.path() }
+    pub fn mount_path(&self) -> &Path { self.mount.path() }
+
+    /// Sleep past the debounce window so the watcher task can dispatch.
+    pub async fn wait_for_debounce(&self) {
+        tokio::time::sleep(Duration::from_millis(self.debounce_ms + 300)).await;
     }
 }
 

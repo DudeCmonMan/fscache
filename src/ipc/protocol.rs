@@ -100,6 +100,15 @@ pub enum TelemetryEvent {
         enabled: bool,
         started_at: Option<i64>,
     },
+    /// A backing directory change was detected by the inotify watcher.
+    BackingChanged {
+        mount_id: Option<String>,
+        path: Option<String>,
+        /// "create" | "delete" | "modify" | "attr" | "rename"
+        kind: Option<String>,
+        /// "kernel_notified" | "cache_evicted" | "both" | "noop"
+        action: Option<String>,
+    },
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]

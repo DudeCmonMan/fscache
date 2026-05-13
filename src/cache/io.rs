@@ -1,4 +1,4 @@
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::ffi::CString;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
@@ -7,7 +7,7 @@ use std::os::unix::fs::MetadataExt;
 use std::os::unix::io::FromRawFd;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use tokio::sync::{Mutex, Notify, Semaphore};
@@ -27,6 +27,13 @@ pub struct CacheIoConfig {
     pub deferred_ttl_minutes: u64,
 }
 
+/// Coordination handle for a single in-flight copy. Shared between the copy worker and the
+/// backing watcher. The watcher sets `abort` when a backing change is detected mid-copy;
+/// the worker checks the flag before committing the rename.
+pub struct CopyControl {
+    pub abort: AtomicBool,
+}
+
 /// Single source of truth for all pending and in-flight cache work.
 ///
 /// The `queue` is a FIFO of paths waiting for the caching window to open.
@@ -38,14 +45,15 @@ struct PipelineState {
     /// FIFO of `(rel_path, enqueue_timestamp_secs)`.
     queue: VecDeque<(PathBuf, u64)>,
     /// All paths currently queued OR in flight. Drives submit-time dedup.
-    known: HashSet<PathBuf>,
+    /// Value is the abort-control handle for in-flight entries (None while still queued).
+    known: HashMap<PathBuf, Option<Arc<CopyControl>>>,
 }
 
 impl PipelineState {
     fn new() -> Self {
         Self {
             queue: VecDeque::new(),
-            known: HashSet::new(),
+            known: HashMap::new(),
         }
     }
 }
@@ -91,7 +99,8 @@ impl CacheIO {
             tracing::info!("cache_io: loaded {} deferred job(s) from DB", loaded.len());
         }
         for (_, path, ts) in loaded {
-            if initial.known.insert(path.clone()) {
+            if !initial.known.contains_key(&path) {
+                initial.known.insert(path.clone(), None);
                 initial.queue.push_back((path, ts));
             }
         }
@@ -151,13 +160,14 @@ impl CacheIO {
 
         let queue_len = {
             let mut st = self.state.lock().await;
-            if !st.known.insert(rel_path.clone()) {
+            if st.known.contains_key(&rel_path) {
                 tracing::debug!(
                     "cache_io: {} already queued or in flight, skipping",
                     rel_path.display()
                 );
                 return;
             }
+            st.known.insert(rel_path.clone(), None);
             let now = now_secs();
             st.queue.push_back((rel_path.clone(), now));
             let len = st.queue.len() as u64;
@@ -183,6 +193,13 @@ impl CacheIO {
         );
 
         self.notify.notify_one();
+    }
+
+    /// Signal the in-flight copy for `rel` to abort before committing. No-op if not in flight.
+    pub async fn mark_abort(&self, rel: &Path) {
+        if let Some(Some(ctrl)) = self.state.lock().await.known.get(rel) {
+            ctrl.abort.store(true, Ordering::Release);
+        }
     }
 
     /// Remove TTL-expired entries from the front of the queue.
@@ -278,6 +295,10 @@ async fn copy_worker(io: CacheIO, rel_path: PathBuf) {
         return;
     }
 
+    // Promote this entry from queued (None) to in-flight (Some(CopyControl)).
+    let control = Arc::new(CopyControl { abort: AtomicBool::new(false) });
+    io.state.lock().await.known.insert(rel_path.clone(), Some(Arc::clone(&control)));
+
     // On-demand eviction: make room if needed. The evict_lock serialises concurrent
     // workers so they don't compute the same deletion set and over-evict.
     if !io.cache.has_free_space() {
@@ -349,8 +370,9 @@ async fn copy_worker(io: CacheIO, rel_path: PathBuf) {
     let rel = rel_path.clone();
     let dest = cache_dest.clone();
     let progress = Arc::clone(&bytes_copied);
+    let ctrl = control.clone();
     let result = tokio::task::spawn_blocking(move || {
-        perform_copy(&bs, &rel, &dest, &progress)
+        perform_copy(&bs, &rel, &dest, &progress, Some(ctrl))
     })
     .await;
 
@@ -429,6 +451,7 @@ fn perform_copy(
     rel_path: &Path,
     cache_dest: &Path,
     bytes_copied: &AtomicU64,
+    control: Option<Arc<CopyControl>>,
 ) -> std::io::Result<()> {
     if let Some(parent) = cache_dest.parent() {
         std::fs::create_dir_all(parent)?;
@@ -443,6 +466,8 @@ fn perform_copy(
 
     let src_meta = src.metadata()?;
     let file_size_bytes = src_meta.len();
+    let initial_mtime = src_meta.mtime();
+    let initial_size = src_meta.len() as i64;
     tracing::info!(
         "copy starting: {} ({:.1} MB)",
         rel_path.display(),
@@ -484,6 +509,20 @@ fn perform_copy(
     drop(dst);
 
     apply_source_metadata(&partial, &src_meta);
+
+    // Before committing, verify the backing hasn't changed since the copy started.
+    // Catches rename-replace and signals from the backing watcher (abort flag).
+    let aborted = control.as_ref().map_or(false, |c| c.abort.load(Ordering::Acquire));
+    let stale = bs.stat(rel_path).map_or(false, |s| {
+        s.st_size != initial_size || s.st_mtime != initial_mtime
+    });
+    if aborted || stale {
+        let _ = std::fs::remove_file(&partial);
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            "backing changed during copy",
+        ));
+    }
 
     if let Err(e) = std::fs::rename(&partial, cache_dest) {
         let _ = std::fs::remove_file(&partial);
@@ -535,5 +574,5 @@ pub fn copy_for_tests(
     cache_dest: &Path,
 ) -> std::io::Result<()> {
     let dummy = AtomicU64::new(0);
-    perform_copy(bs, rel_path, cache_dest, &dummy)
+    perform_copy(bs, rel_path, cache_dest, &dummy, None)
 }

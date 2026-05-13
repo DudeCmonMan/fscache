@@ -100,6 +100,14 @@ where
                     size_bytes: visitor.size_bytes,
                 },
             )),
+            Some(e) if e == telemetry::EVENT_BACKING_CHANGED => Some(DaemonMessage::Event(
+                TelemetryEvent::BackingChanged {
+                    mount_id: visitor.mount_id.clone(),
+                    path: visitor.path.clone(),
+                    kind: visitor.kind.clone(),
+                    action: visitor.action.clone(),
+                },
+            )),
             _ => None,
         };
 
@@ -141,6 +149,9 @@ struct EventVisitor {
     message:    Option<String>,
     path:       Option<String>,
     reason:     Option<String>,
+    kind:       Option<String>,
+    action:     Option<String>,
+    mount_id:   Option<String>,
     bytes_read:   Option<u64>,
     bytes_copied: Option<u64>,
     size_bytes:   Option<u64>,
@@ -153,10 +164,13 @@ struct EventVisitor {
 impl Visit for EventVisitor {
     fn record_str(&mut self, field: &Field, value: &str) {
         match field.name() {
-            "event"   => self.event   = Some(value.to_string()),
-            "message" => self.message = Some(value.to_string()),
-            "path"    => self.path    = Some(value.to_string()),
-            "reason"  => self.reason  = Some(value.to_string()),
+            "event"    => self.event    = Some(value.to_string()),
+            "message"  => self.message  = Some(value.to_string()),
+            "path"     => self.path     = Some(value.to_string()),
+            "reason"   => self.reason   = Some(value.to_string()),
+            "kind"     => self.kind     = Some(value.to_string()),
+            "action"   => self.action   = Some(value.to_string()),
+            "mount_id" => self.mount_id = Some(value.to_string()),
             _ => {}
         }
     }
@@ -183,10 +197,13 @@ impl Visit for EventVisitor {
         let s = format!("{value:?}");
         let s = s.trim_matches('"');
         match field.name() {
-            "event"   => self.event   = Some(s.to_string()),
-            "message" => self.message = Some(s.to_string()),
-            "path"    => self.path    = Some(s.to_string()),
-            "reason"  => self.reason  = Some(s.to_string()),
+            "event"    => self.event    = Some(s.to_string()),
+            "message"  => self.message  = Some(s.to_string()),
+            "path"     => self.path     = Some(s.to_string()),
+            "reason"   => self.reason   = Some(s.to_string()),
+            "kind"     => self.kind     = Some(s.to_string()),
+            "action"   => self.action   = Some(s.to_string()),
+            "mount_id" => self.mount_id = Some(s.to_string()),
             _ => {}
         }
     }

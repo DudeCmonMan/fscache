@@ -23,6 +23,8 @@ pub struct Config {
     pub invalidation: InvalidationConfig,
     #[serde(default)]
     pub discovery: DiscoveryConfig,
+    #[serde(default)]
+    pub backing_watch: BackingWatchConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -330,6 +332,36 @@ impl Default for DiscoveryConfig {
             bucket_interval_secs: 60,
             pid_lru_capacity: 512,
             pid_lru_ttl_secs: 300,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(default)]
+pub struct BackingWatchConfig {
+    /// Watch backing directories for external changes and propagate them as filesystem
+    /// notifications to upstream consumers (Plex, etc.) and invalidate stale cache entries.
+    ///
+    /// Note: IN_CREATE cannot be delivered to FUSE-mount inotify watchers on read-only FUSE
+    /// mounts (kernel-level constraint). Delete, modify, attr, and rename events ARE delivered.
+    /// Note: inotify is local-kernel-only; cross-host writes to a shared backing are not observed.
+    pub enabled: bool,
+    /// Hard cap on simultaneous inotify watches. Compare against
+    /// `cat /proc/sys/fs/inotify/max_user_watches`. When the cap is reached, the watcher
+    /// evicts its least-recently-touched watch (LRU) to make room.
+    pub max_dirs: usize,
+    /// Coalesce raw inotify events on the same (dir, name) within this window (milliseconds).
+    /// Leading-edge fixed window: an event opens a window, the window fires at +debounce_ms with
+    /// the highest-severity event collected. Lower for real-time consumers; raise for batchy workflows.
+    pub debounce_ms: u64,
+}
+
+impl Default for BackingWatchConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            max_dirs: 65536,
+            debounce_ms: 3000,
         }
     }
 }

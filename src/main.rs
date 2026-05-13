@@ -1,4 +1,5 @@
 mod backing_store;
+mod backing_watch;
 mod cache;
 mod config;
 mod discovery;
@@ -345,8 +346,19 @@ async fn run_daemon(config_path: Option<PathBuf>) -> anyhow::Result<()> {
         tracing::info!("[{}] Target: {}", mount_name, target.display());
         tracing::info!("[{}] Cache:  {}", mount_name, mount_cache_dir.display());
 
+        // Create the backing-watcher channel before FsCache so the handle can be embedded.
+        let (watch_tx, watch_rx) = if config.backing_watch.enabled {
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            (Some(tx), Some(rx))
+        } else {
+            (None, None)
+        };
+
         let mut fs = fuse::fusefs::FsCache::new(target)?;
         fs.passthrough_mode  = config.cache.passthrough_mode;
+        if let Some(tx) = watch_tx {
+            fs.backing_watch = Some(backing_watch::BackingWatchHandle::new(tx));
+        }
         fs.repeat_log_window = std::time::Duration::from_secs(
             config.logging.repeat_log_window_secs,
         );
@@ -424,6 +436,8 @@ async fn run_daemon(config_path: Option<PathBuf>) -> anyhow::Result<()> {
             scheduler,
             shutdown_token.clone(),
         );
+        // Clone before move into ActionEngine so the backing watcher can use it too.
+        let cache_io_for_watcher = watch_rx.as_ref().map(|_| cache_io.clone());
         for h in io_handles {
             background.spawn(async move { let _ = h.await; });
         }
@@ -455,6 +469,21 @@ async fn run_daemon(config_path: Option<PathBuf>) -> anyhow::Result<()> {
                 target.display()
             )
         })?;
+
+        // Spawn the backing watcher now that we have the notifier from the mounted session.
+        if let (Some(rx), Some(bw_io)) = (watch_rx, cache_io_for_watcher) {
+            let notifier = session.notifier();
+            background.spawn(backing_watch::run(
+                rx,
+                notifier,
+                Arc::clone(&backing_store),
+                Arc::clone(&cache_manager),
+                bw_io,
+                config.backing_watch.clone(),
+                shutdown_token.clone(),
+                mount_name.clone(),
+            ));
+        }
 
         mounts.push(MountHandle { _session: session, target: target.clone() });
     }

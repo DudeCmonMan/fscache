@@ -175,6 +175,12 @@ fn apply_event(event: &TelemetryEvent, state: &DashboardState) {
             _ => {}
         },
         TelemetryEvent::DiscoveryStatus { .. } => {}
+        TelemetryEvent::BackingChanged { action, .. } => {
+            state.backing_events_handled.fetch_add(1, Relaxed);
+            if matches!(action.as_deref(), Some("cache_evicted") | Some("both")) {
+                state.backing_evictions_triggered.fetch_add(1, Relaxed);
+            }
+        }
     }
 }
 

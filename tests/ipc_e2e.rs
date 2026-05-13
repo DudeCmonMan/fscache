@@ -47,8 +47,9 @@ fn test_config() -> Arc<Config> {
         plex:        PlexConfig::default(),
         schedule:    ScheduleConfig::default(),
         logging:     LoggingConfig::default(),
-        invalidation: fscache::config::InvalidationConfig::default(),
-        discovery: DiscoveryConfig::default(),
+        invalidation:   fscache::config::InvalidationConfig::default(),
+        discovery:      DiscoveryConfig::default(),
+        backing_watch:  fscache::config::BackingWatchConfig::default(),
     })
 }
 

@@ -78,6 +78,20 @@ file_level = "debug"                     # Log level for log files (captures ful
 repeat_log_window_secs = 300             # Suppress repeated access logs for the same file within this window (0 = disabled)
 
 # ---------------------------------------------------------------------------
+# [backing_watch] — inotify watcher for out-of-band backing directory changes
+# ---------------------------------------------------------------------------
+# Watches backing directories for changes made by external writers (Sonarr,
+# rsync, etc.) and evicts stale cache entries automatically. Always on by default.
+[backing_watch]
+enabled = true                           # Set false to disable the watcher entirely
+max_dirs = 65536                         # Max simultaneous inotify watches. Compare against
+                                         # /proc/sys/fs/inotify/max_user_watches. LRU-evicts
+                                         # least-recently-touched dirs when the cap is reached.
+debounce_ms = 3000                       # Coalesce rapid events on the same file into one
+                                         # eviction (milliseconds). Lower for real-time consumers;
+                                         # raise for batchy workflows like rsync.
+
+# ---------------------------------------------------------------------------
 # [discovery] — process discovery (which processes touch the FUSE mount)
 # ---------------------------------------------------------------------------
 # Off by default. Arm at runtime with `fscache discover start`,

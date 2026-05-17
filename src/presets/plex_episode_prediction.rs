@@ -33,32 +33,18 @@ impl PlexEpisodePrediction {
 }
 
 const STREAMING_FORMATS: &[&[u8]] = &[b"dash", b"ssegment", b"mpegts"];
-const ANALYSIS_FORMATS:  &[&[u8]] = &[b"null", b"chromaprint", b"flac", b"image2"];
 
-/// Real playback always uses one of these streaming container formats.
-fn has_streaming_output(args: &[&[u8]]) -> bool {
-    args.windows(2).any(|pair| pair[0] == b"-f" && STREAMING_FORMATS.contains(&pair[1]))
-}
-
-/// Detection transcoders use non-streaming output formats.
-fn has_analysis_output(args: &[&[u8]]) -> bool {
-    args.windows(2).any(|pair| pair[0] == b"-f" && ANALYSIS_FORMATS.contains(&pair[1]))
-}
-
-/// Detection transcoders write to /Transcode/Detection/ — catches future analysis
-/// modes that may use formats not yet in ANALYSIS_FORMATS.
-fn has_detection_output_path(cmdline: &[u8]) -> bool {
-    cmdline.windows(b"/Transcode/Detection/".len())
-        .any(|w| w == b"/Transcode/Detection/")
-}
-
-/// Returns true if this cmdline belongs to a Plex Transcoder doing analysis, not playback.
-fn is_plex_detection_cmdline(cmdline: &[u8]) -> bool {
-    let args: Vec<&[u8]> = cmdline.split(|&b| b == 0).collect();
-    if has_streaming_output(&args) {
-        return false;
+/// Playback always uses a streaming container format (-f dash, ssegment, or mpegts).
+/// Background analysis and detection tasks use non-streaming formats.
+fn is_plex_playback_cmdline(cmdline: &[u8]) -> bool {
+    let mut prev: &[u8] = b"";
+    for tok in cmdline.split(|&b| b == 0) {
+        if prev == b"-f" && STREAMING_FORMATS.contains(&tok) {
+            return true;
+        }
+        prev = tok;
     }
-    has_analysis_output(&args) || has_detection_output_path(cmdline)
+    false
 }
 
 impl CachePreset for PlexEpisodePrediction {
@@ -71,11 +57,13 @@ impl CachePreset for PlexEpisodePrediction {
         if !self.blocklist.is_empty() && process.is_blocked_by(&self.blocklist) {
             return true;
         }
-        // Check if this Plex Transcoder is doing detection work rather than playback.
+        // Plex Transcoder: cache only if the cmdline positively proves streamed playback.
+        // No cmdline (unreadable /proc) or no streaming muxer means not playback → filter.
         if process.name.as_deref() == Some("Plex Transcoder") {
-            if let Some(ref cmdline) = process.cmdline {
-                return is_plex_detection_cmdline(cmdline);
-            }
+            return match process.cmdline {
+                Some(ref c) => !is_plex_playback_cmdline(c),
+                None => true,
+            };
         }
         false
     }
@@ -102,130 +90,142 @@ impl CachePreset for PlexEpisodePrediction {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::preset::ProcessInfo;
 
-    fn split(cmdline: &[u8]) -> Vec<&[u8]> {
-        cmdline.split(|&b| b == 0).collect()
+    fn make_preset() -> PlexEpisodePrediction {
+        PlexEpisodePrediction::new(4, vec![], false)
+    }
+
+    fn transcoder(cmdline: &[u8]) -> ProcessInfo {
+        ProcessInfo {
+            pid: 0,
+            name: Some("Plex Transcoder".into()),
+            cmdline: Some(cmdline.to_vec()),
+            ancestors: vec![],
+        }
+    }
+
+    fn transcoder_no_cmdline() -> ProcessInfo {
+        ProcessInfo {
+            pid: 0,
+            name: Some("Plex Transcoder".into()),
+            cmdline: None,
+            ancestors: vec![],
+        }
+    }
+
+    fn other_process(name: &str) -> ProcessInfo {
+        ProcessInfo {
+            pid: 0,
+            name: Some(name.into()),
+            cmdline: Some(b"some\0args".to_vec()),
+            ancestors: vec![],
+        }
+    }
+
+    // --- Playback shapes: should NOT be filtered ---
+
+    #[test]
+    fn playback_ssegment_not_filtered() {
+        let cmdline = b"Plex Transcoder\0-i\0input.mkv\
+            \0-f\0ssegment\0-segment_format\0mpegts\0media-%05d.ts";
+        assert!(!make_preset().should_filter(&transcoder(cmdline)));
     }
 
     #[test]
-    fn detection_null_output() {
+    fn playback_dash_not_filtered() {
+        let cmdline = b"Plex Transcoder\0-i\0input.mkv\
+            \0-progressurl\0http://127.0.0.1:32400/.../progress\
+            \0-f\0dash\0manifest.mpd";
+        assert!(!make_preset().should_filter(&transcoder(cmdline)));
+    }
+
+    #[test]
+    fn playback_mpegts_pipe_not_filtered() {
+        // Direct-stream to pipe: real playback mode, no segment manifest.
+        let cmdline = b"Plex Transcoder\0-i\0input.ts\
+            \0-progressurl\0http://127.0.0.1:32400/.../progress\
+            \0-f\0mpegts\0pipe:1";
+        assert!(!make_preset().should_filter(&transcoder(cmdline)));
+    }
+
+    #[test]
+    fn playback_dash_with_secondary_null_not_filtered() {
+        // Subtitle extraction adds -f null; streaming format takes precedence.
+        let cmdline = b"Plex Transcoder\0-i\0input.mkv\
+            \0-f\0dash\0manifest.mpd\
+            \0-map\x000:2\0-f\0null\0-codec\0ass\0nullfile";
+        assert!(!make_preset().should_filter(&transcoder(cmdline)));
+    }
+
+    // --- Detection / analysis shapes: MUST be filtered ---
+
+    #[test]
+    fn detection_null_filtered() {
         let cmdline = b"Plex Transcoder\0-i\0input.mkv\0-vn\0-f\0null\0-";
-        assert!(has_analysis_output(&split(cmdline)));
-        assert!(!has_streaming_output(&split(cmdline)));
+        assert!(make_preset().should_filter(&transcoder(cmdline)));
     }
 
     #[test]
-    fn detection_chromaprint_output() {
+    fn detection_chromaprint_filtered() {
         let cmdline = b"Plex Transcoder\0-i\0input.mkv\0-f\0chromaprint\0-";
-        assert!(has_analysis_output(&split(cmdline)));
-        assert!(!has_streaming_output(&split(cmdline)));
+        assert!(make_preset().should_filter(&transcoder(cmdline)));
     }
 
-    // Credits detection transcoder: has -progressurl but is NOT playback.
-    // Primary output is -f flac to /dev/shm/Transcode/Detection/, secondary -f null.
-    // Previously this slipped through the -progressurl gate — caught by format check now.
     #[test]
-    fn detection_flac_with_progressurl() {
+    fn detection_flac_filtered() {
+        // Credits detection: -f flac to Detection path, -progressurl present.
         let cmdline = b"Plex Transcoder\0-i\0input.mkv\
             \0-progressurl\0http://127.0.0.1:32400/.../progress\
             \0-codec:0\0flac\0-f\0flac\
             \0/dev/shm/Transcode/Detection/abc123\
             \0-f\0null\0nullfile";
-        assert!(!has_streaming_output(&split(cmdline)));
-        assert!(has_analysis_output(&split(cmdline)));
-        assert!(has_detection_output_path(cmdline));
+        assert!(make_preset().should_filter(&transcoder(cmdline)));
     }
 
     #[test]
-    fn detection_image2_thumbnails() {
+    fn detection_image2_thumbnails_filtered() {
         let cmdline = b"Plex Transcoder\0-i\0input.mkv\
             \0-skip_frame\0noref\0-vf\0fps=0.5,scale=w=320:h=320\
             \0-f\0image2\0thumb-%05d.jpeg";
-        assert!(!has_streaming_output(&split(cmdline)));
-        assert!(has_analysis_output(&split(cmdline)));
+        assert!(make_preset().should_filter(&transcoder(cmdline)));
     }
 
-    // Path check catches analysis even when format is unrecognized.
     #[test]
-    fn detection_output_path() {
+    fn unknown_format_filtered() {
+        // Unknown purpose, no streaming muxer → not playback → filter (fail-safe).
+        let cmdline = b"Plex Transcoder\0-i\0input.mkv\0-codec\0copy\0output.mkv";
+        assert!(make_preset().should_filter(&transcoder(cmdline)));
+    }
+
+    #[test]
+    fn detection_output_path_unknown_format_filtered() {
         let cmdline = b"Plex Transcoder\0-i\0input.mkv\
             \0-f\0someunknownformat\
             \0/dev/shm/Transcode/Detection/abc123";
-        assert!(!has_streaming_output(&split(cmdline)));
-        assert!(!has_analysis_output(&split(cmdline))); // format unknown
-        assert!(has_detection_output_path(cmdline));    // but path catches it
+        assert!(make_preset().should_filter(&transcoder(cmdline)));
     }
 
-    // Bug case: playback with secondary -f null for subtitle extraction.
-    // The -f dash streaming format takes precedence.
-    #[test]
-    fn playback_dash_with_secondary_null_not_detection() {
-        let cmdline = b"Plex Transcoder\0-i\0input.mkv\
-            \0-progressurl\0http://127.0.0.1:32400/.../progress\
-            \0-f\0dash\0manifest.mpd\
-            \0-map\x000:2\0-f\0null\0-codec\0ass\0nullfile";
-        assert!(has_streaming_output(&split(cmdline)));
-        assert!(has_analysis_output(&split(cmdline))); // secondary -f null present
-    }
+    // --- Fail-safe: unreadable cmdline → filter ---
 
     #[test]
-    fn playback_dash_not_detection() {
-        let cmdline = b"Plex Transcoder\0-i\0input.mkv\
-            \0-progressurl\0http://127.0.0.1:32400/.../progress\
-            \0-f\0dash\0manifest.mpd";
-        assert!(has_streaming_output(&split(cmdline)));
-        assert!(!has_analysis_output(&split(cmdline)));
+    fn no_cmdline_filtered() {
+        assert!(make_preset().should_filter(&transcoder_no_cmdline()));
     }
 
-    #[test]
-    fn playback_ssegment_not_detection() {
-        let cmdline = b"Plex Transcoder\0-i\0input.mkv\
-            \0-progressurl\0http://127.0.0.1:32400/.../progress\
-            \0-f\0ssegment\0-segment_format\0mp4\0media-%05d.ts";
-        assert!(has_streaming_output(&split(cmdline)));
-        assert!(!has_analysis_output(&split(cmdline)));
-    }
+    // --- Other processes are unaffected by the transcoder branch ---
 
     #[test]
-    fn playback_mpegts_not_detection() {
-        let cmdline = b"Plex Transcoder\0-i\0input.ts\
-            \0-progressurl\0http://127.0.0.1:32400/.../progress\
-            \0-f\0mpegts\0pipe:1";
-        assert!(has_streaming_output(&split(cmdline)));
-        assert!(!has_analysis_output(&split(cmdline)));
+    fn other_process_not_filtered() {
+        assert!(!make_preset().should_filter(&other_process("Plex Media Server")));
     }
 
-    // Unknown purpose, no recognized signals → not detection (conservative default).
-    #[test]
-    fn unknown_transcoder_not_detection() {
-        let cmdline = b"Plex Transcoder\0-i\0input.mkv\0-codec\0copy\0output.mkv";
-        assert!(!has_streaming_output(&split(cmdline)));
-        assert!(!has_analysis_output(&split(cmdline)));
-        assert!(!has_detection_output_path(cmdline));
-    }
-
-    // End-to-end: is_plex_detection_cmdline combines all three signals.
-    #[test]
-    fn detection_cmdline_null() {
-        let cmdline = b"Plex Transcoder\0-i\0input.mkv\0-f\0null\0-";
-        assert!(is_plex_detection_cmdline(cmdline));
-    }
+    // --- Blocklist still applies ---
 
     #[test]
-    fn detection_cmdline_detection_path() {
-        let cmdline = b"Plex Transcoder\0-i\0input.mkv\0-f\0unknownfmt\0/dev/shm/Transcode/Detection/xyz";
-        assert!(is_plex_detection_cmdline(cmdline));
+    fn blocklist_blocks_scanner() {
+        let preset = PlexEpisodePrediction::new(4, vec!["Plex Media Scanner".into()], false);
+        assert!(preset.should_filter(&other_process("Plex Media Scanner")));
     }
 
-    #[test]
-    fn playback_cmdline_dash_not_detection() {
-        let cmdline = b"Plex Transcoder\0-i\0input.mkv\0-f\0dash\0manifest.mpd";
-        assert!(!is_plex_detection_cmdline(cmdline));
-    }
-
-    #[test]
-    fn playback_cmdline_dash_with_null_not_detection() {
-        let cmdline = b"Plex Transcoder\0-i\0input.mkv\0-f\0dash\0manifest.mpd\0-f\0null\0-";
-        assert!(!is_plex_detection_cmdline(cmdline));
-    }
 }

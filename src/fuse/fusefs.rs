@@ -97,7 +97,6 @@ impl FsCache {
         })
     }
 
-    /// Returns true if this path was already logged at INFO within the repeat window.
     /// On first call (or after the window expires), records the timestamp and returns false.
     pub fn should_suppress_log(&self, path: &Path) -> bool {
         if self.repeat_log_window.is_zero() {
@@ -215,7 +214,6 @@ impl FsCache {
         entries
     }
 
-    /// Attempt to serve `path` from the cache, falling back to the backing store.
     /// Handles the cache-hit-race fall-through internally.
     ///
     /// `filtered` is passed through only to determine the return outcome (Hit vs
@@ -396,7 +394,21 @@ impl Filesystem for FsCache {
         let (filtered, opener_name) = if let Some(ref preset) = self.preset {
             let proc = process.as_ref().unwrap();
             let name = proc.name.clone();
-            if preset.should_filter(proc) {
+            let is_filtered = preset.should_filter(proc);
+            if proc.name.as_deref() == Some("Plex Transcoder") {
+                let cmdline = proc.cmdline.as_deref()
+                    .map(|b| b.split(|&c| c == 0)
+                        .filter(|s| !s.is_empty())
+                        .map(|s| String::from_utf8_lossy(s).into_owned())
+                        .collect::<Vec<_>>()
+                        .join(" "))
+                    .unwrap_or_default();
+                tracing::debug!(
+                    "Plex Transcoder open: filtered={} pid={} cmdline={:?}",
+                    is_filtered, req.pid(), cmdline,
+                );
+            }
+            if is_filtered {
                 tracing::debug!(
                     "preset filtered pid {} ({}) on {:?}",
                     req.pid(), name.as_deref().unwrap_or("?"), path

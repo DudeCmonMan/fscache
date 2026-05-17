@@ -199,7 +199,7 @@ struct Session {
 }
 
 impl Session {
-    /// Resolve a PID to ProcessInfo, using LRU cache to avoid repeated /proc reads.
+    /// Uses LRU cache to avoid repeated /proc reads.
     fn resolve_pid(&self, pid: u32) -> Arc<ProcessInfo> {
         if let Some(info) = self.pid_lru.lock().unwrap().get(&pid).cloned() {
             return info;
@@ -331,6 +331,16 @@ fn emit_snap(by_process: &std::collections::HashMap<&str, [u64; 3]>) {
     }
 }
 
+const DISCOVERY_CMDLINE_MAX: usize = 4096;
+
+/// Truncates `s` at the largest char boundary <= `max_bytes`.
+fn truncate_cmdline(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes { return s; }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) { end -= 1; }
+    &s[..end]
+}
+
 fn format_process_info(info: &ProcessInfo) -> (String, String) {
     let cmdline = info.cmdline.as_deref()
         .map(|b| {
@@ -339,11 +349,44 @@ fn format_process_info(info: &ProcessInfo) -> (String, String) {
                 .map(|s| String::from_utf8_lossy(s).into_owned())
                 .collect::<Vec<_>>()
                 .join(" ");
-            if s.len() > 100 { format!("{}…", &s[..100]) } else { s }
+            if s.len() > DISCOVERY_CMDLINE_MAX {
+                format!("{}…", truncate_cmdline(&s, DISCOVERY_CMDLINE_MAX))
+            } else {
+                s
+            }
         })
         .unwrap_or_default();
     let ancestors = info.ancestors.join(">");
     (cmdline, ancestors)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_cmdline_safe_on_char_boundary() {
+        let s = "a".repeat(DISCOVERY_CMDLINE_MAX + 10);
+        let t = truncate_cmdline(&s, DISCOVERY_CMDLINE_MAX);
+        assert_eq!(t.len(), DISCOVERY_CMDLINE_MAX);
+        assert!(std::str::from_utf8(t.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn truncate_cmdline_safe_on_multibyte_boundary() {
+        // Place a 2-byte char (é) straddling DISCOVERY_CMDLINE_MAX.
+        let prefix = "a".repeat(DISCOVERY_CMDLINE_MAX - 1);
+        let s = prefix + "é" + "bbb";
+        let t = truncate_cmdline(&s, DISCOVERY_CMDLINE_MAX);
+        assert!(t.len() <= DISCOVERY_CMDLINE_MAX);
+        assert!(std::str::from_utf8(t.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn truncate_cmdline_short_string_unchanged() {
+        let s = "hello world";
+        assert_eq!(truncate_cmdline(s, DISCOVERY_CMDLINE_MAX), s);
+    }
 }
 
 fn utc_time_hms() -> String {

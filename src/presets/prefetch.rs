@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use regex::Regex;
 
-use crate::preset::{CacheAction, CachePreset, ProcessInfo, RuleContext};
+use crate::preset::{CacheAction, CachePreset, ProcessFilterPolicy, ProcessInfo, RuleContext};
 
 pub fn parse_mode(s: &str) -> anyhow::Result<PrefetchMode> {
     match s {
@@ -28,7 +28,7 @@ pub enum PrefetchMode {
 pub struct Prefetch {
     mode: PrefetchMode,
     max_depth: usize,
-    blocklist: Vec<String>,
+    process_policy: ProcessFilterPolicy,
     whitelist: Vec<Regex>,
     blacklist: Vec<Regex>,
 }
@@ -40,6 +40,24 @@ impl Prefetch {
         mode: PrefetchMode,
         max_depth: usize,
         blocklist: Vec<String>,
+        whitelist_patterns: &[String],
+        blacklist_patterns: &[String],
+    ) -> anyhow::Result<Self> {
+        Self::new_with_process_policy(
+            mode,
+            max_depth,
+            Vec::new(),
+            blocklist,
+            whitelist_patterns,
+            blacklist_patterns,
+        )
+    }
+
+    pub fn new_with_process_policy(
+        mode: PrefetchMode,
+        max_depth: usize,
+        process_allowlist: Vec<String>,
+        process_blocklist: Vec<String>,
         whitelist_patterns: &[String],
         blacklist_patterns: &[String],
     ) -> anyhow::Result<Self> {
@@ -57,21 +75,18 @@ impl Prefetch {
         Ok(Self {
             mode,
             max_depth,
-            blocklist,
+            process_policy: ProcessFilterPolicy::new(process_allowlist, process_blocklist),
             whitelist: compile(whitelist_patterns)?,
             blacklist: compile(blacklist_patterns)?,
         })
     }
 
-    /// Blacklist is checked first; then whitelist (empty whitelist = allow all).
+    /// A non-empty whitelist is authoritative; otherwise blacklist excludes matches.
     fn passes_filter(&self, filename: &str) -> bool {
-        if self.blacklist.iter().any(|r| r.is_match(filename)) {
-            return false;
+        if !self.whitelist.is_empty() {
+            return self.whitelist.iter().any(|r| r.is_match(filename));
         }
-        if self.whitelist.is_empty() {
-            return true;
-        }
-        self.whitelist.iter().any(|r| r.is_match(filename))
+        !self.blacklist.iter().any(|r| r.is_match(filename))
     }
 
     fn collect_neighbors(&self, path: &Path, ctx: &RuleContext) -> Vec<PathBuf> {
@@ -136,10 +151,7 @@ impl CachePreset for Prefetch {
     }
 
     fn should_filter(&self, process: &ProcessInfo) -> bool {
-        if self.blocklist.is_empty() {
-            return false;
-        }
-        process.is_blocked_by(&self.blocklist)
+        self.process_policy.should_filter(process)
     }
 
     fn on_miss(&self, path: &Path, ctx: &RuleContext) -> Vec<CacheAction> {

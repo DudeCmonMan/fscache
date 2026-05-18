@@ -13,7 +13,7 @@ use crate::cache::db::{CacheDb, ProcessAccessRow};
 use crate::config::DiscoveryConfig;
 use crate::fuse::fusefs::OpenOutcome;
 use crate::ipc::protocol::{DaemonMessage, TelemetryEvent};
-use crate::preset::ProcessInfo;
+use crate::preset::{ProcessFilterPolicy, ProcessInfo};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OpKind { Hit, Miss, Meta }
@@ -43,7 +43,7 @@ pub struct DiscoveryController {
     start_stop: Mutex<()>,
     config: DiscoveryConfig,
     db: Arc<CacheDb>,
-    blocklist: Arc<Vec<String>>,
+    process_policy: Arc<ProcessFilterPolicy>,
     root_token: CancellationToken,
     ipc_tx: tokio::sync::broadcast::Sender<DaemonMessage>,
 }
@@ -56,13 +56,29 @@ impl DiscoveryController {
         root_token: CancellationToken,
         ipc_tx: tokio::sync::broadcast::Sender<DaemonMessage>,
     ) -> Arc<Self> {
+        Self::new_with_process_policy(
+            config,
+            db,
+            Arc::new(ProcessFilterPolicy::new(Vec::new(), (*blocklist).clone())),
+            root_token,
+            ipc_tx,
+        )
+    }
+
+    pub fn new_with_process_policy(
+        config: DiscoveryConfig,
+        db: Arc<CacheDb>,
+        process_policy: Arc<ProcessFilterPolicy>,
+        root_token: CancellationToken,
+        ipc_tx: tokio::sync::broadcast::Sender<DaemonMessage>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             enabled: Arc::new(AtomicBool::new(false)),
             session: ArcSwapOption::empty(),
             start_stop: Mutex::new(()),
             config,
             db,
-            blocklist,
+            process_policy,
             root_token,
             ipc_tx,
         })
@@ -109,7 +125,8 @@ impl DiscoveryController {
         if session.seen.insert(name.clone()) {
             let (cmdline, ancestors) = format_process_info(info);
             session.samples.insert(name.clone(), (Some(cmdline.clone()), Some(ancestors.clone())));
-            let blocked = info.is_blocked_by(&session.blocklist);
+            let blocked = session.process_policy.should_filter(info);
+            session.blocked.insert(name.clone(), blocked);
             emit_new(info, &name, &ancestors, &cmdline, blocked);
         }
 
@@ -131,9 +148,10 @@ impl DiscoveryController {
             child_token: child_token.clone(),
             counts: Arc::new(DashMap::new()),
             samples: Arc::new(DashMap::new()),
+            blocked: Arc::new(DashMap::new()),
             seen: Arc::new(DashSet::new()),
             pid_lru: Arc::new(Mutex::new(LruCache::new(lru_cap))),
-            blocklist: Arc::clone(&self.blocklist),
+            process_policy: Arc::clone(&self.process_policy),
             started_at: now,
         });
 
@@ -192,9 +210,10 @@ struct Session {
     child_token: CancellationToken,
     counts: Arc<DashMap<(Arc<str>, OpKind), AtomicU64>>,
     samples: Arc<DashMap<Arc<str>, (Option<String>, Option<String>)>>,
+    blocked: Arc<DashMap<Arc<str>, bool>>,
     seen: Arc<DashSet<Arc<str>>>,
     pid_lru: Arc<Mutex<LruCache<u32, Arc<ProcessInfo>>>>,
-    blocklist: Arc<Vec<String>>,
+    process_policy: Arc<ProcessFilterPolicy>,
     started_at: i64,
 }
 
@@ -211,7 +230,8 @@ impl Session {
         if self.seen.insert(name.clone()) {
             let (cmdline, ancestors) = format_process_info(&info);
             self.samples.insert(name.clone(), (Some(cmdline.clone()), Some(ancestors.clone())));
-            let blocked = info.is_blocked_by(&self.blocklist);
+            let blocked = self.process_policy.should_filter(&info);
+            self.blocked.insert(name.clone(), blocked);
             emit_new(&info, &name, &ancestors, &cmdline, blocked);
         }
         info
@@ -289,7 +309,7 @@ async fn flush_bucket(session: &Session, db: Arc<CacheDb>) {
             _ => {}
         }
     }
-    emit_snap(&by_process);
+    emit_snap(&by_process, &session.blocked, &session.process_policy);
 
     let _ = tokio::task::spawn_blocking(move || db.upsert_process_access(&rows)).await;
 }
@@ -311,7 +331,11 @@ fn emit_new(
     );
 }
 
-fn emit_snap(by_process: &std::collections::HashMap<&str, [u64; 3]>) {
+fn emit_snap(
+    by_process: &std::collections::HashMap<&str, [u64; 3]>,
+    blocked_by_process: &DashMap<Arc<str>, bool>,
+    process_policy: &ProcessFilterPolicy,
+) {
     let now = utc_time_hms();
     let mut entries: Vec<_> = by_process.iter().collect();
     entries.sort_unstable_by(|(_, a), (_, b)| {
@@ -324,9 +348,21 @@ fn emit_snap(by_process: &std::collections::HashMap<&str, [u64; 3]>) {
         let miss = counts[1];
         let meta = counts[2];
         let total = hit + miss + meta;
+        let blocked = blocked_by_process
+            .get(*name)
+            .map(|b| *b)
+            .unwrap_or_else(|| {
+                process_policy.should_filter(&ProcessInfo {
+                    pid: 0,
+                    name: Some((*name).to_string()),
+                    cmdline: None,
+                    ancestors: vec![],
+                })
+            });
+        let blk = if blocked { "*" } else { "-" };
         tracing::debug!(
             target: "fscache::discovery",
-            "{now}  SNAP    {name:<32}  -  {hit:>6}  {miss:>6}  {meta:>6}  {total:>8}",
+            "{now}  SNAP    {name:<32}  {blk}  {hit:>6}  {miss:>6}  {meta:>6}  {total:>8}",
         );
     }
 }

@@ -214,6 +214,24 @@ async fn cache_neighbors_blacklist_excludes_matching_files() {
     assert!(!h.cache_path().join("thumb.jpg").exists(), ".jpg is blacklisted");
 }
 
+#[tokio::test]
+async fn cache_neighbors_whitelist_takes_priority_over_blacklist() {
+    let preset = make_preset(PrefetchMode::CacheNeighbors, 3, &[r"\.mkv$"], &[r"\.mkv$"]);
+    let h = FuseHarness::new_full_pipeline_with_preset(preset).unwrap();
+
+    write_backing_file(&h, "ep01.mkv", b"video");
+    write_backing_file(&h, "ep02.mkv", b"video");
+    write_backing_file(&h, "thumb.jpg", b"thumbnail");
+    std::thread::sleep(Duration::from_millis(100));
+
+    let _ = std::fs::read(h.mount_path().join("ep01.mkv")).unwrap();
+    tokio::time::sleep(Duration::from_millis(1200)).await;
+
+    assert!(h.cache_path().join("ep01.mkv").exists(), ".mkv should pass whitelist");
+    assert!(h.cache_path().join("ep02.mkv").exists(), ".mkv should pass whitelist");
+    assert!(!h.cache_path().join("thumb.jpg").exists(), ".jpg should not pass whitelist");
+}
+
 /// Subdirectories inside the accessed file's directory are skipped — only
 /// flat siblings (regular files) are cached.
 #[tokio::test]

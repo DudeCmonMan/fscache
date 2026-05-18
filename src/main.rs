@@ -220,17 +220,20 @@ async fn run_daemon(config_path: Option<PathBuf>) -> anyhow::Result<()> {
     let shutdown_token = tokio_util::sync::CancellationToken::new();
     let mut background: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
 
-    // Combined blocklist for discovery (union of plex + prefetch process blocklists).
-    let mut discovery_blocklist = config.plex.process_blocklist.clone();
-    for name in &config.prefetch.process_blocklist {
-        if !discovery_blocklist.contains(name) {
-            discovery_blocklist.push(name.clone());
-        }
-    }
-    let discovery_ctrl = discovery::DiscoveryController::new(
+    let discovery_process_policy = match config.preset.name.as_str() {
+        "prefetch" => preset::ProcessFilterPolicy::new(
+            config.prefetch.process_allowlist.clone(),
+            config.prefetch.process_blocklist.clone(),
+        ),
+        _ => preset::ProcessFilterPolicy::new(
+            config.plex.process_allowlist.clone(),
+            config.plex.process_blocklist.clone(),
+        ),
+    };
+    let discovery_ctrl = discovery::DiscoveryController::new_with_process_policy(
         config.discovery.clone(),
         Arc::clone(&db),
-        Arc::new(discovery_blocklist),
+        Arc::new(discovery_process_policy),
         shutdown_token.clone(),
         ipc_tx.clone(),
     );
@@ -363,22 +366,24 @@ async fn run_daemon(config_path: Option<PathBuf>) -> anyhow::Result<()> {
             config.logging.repeat_log_window_secs,
         );
 
+        let plex_allowlist  = config.plex.process_allowlist.clone();
         let plex_blocklist  = config.plex.process_blocklist.clone();
         let rolling_buffer  = config.plex.mode == "rolling-buffer";
 
         let preset: Arc<dyn preset::CachePreset> = match config.preset.name.as_str() {
             "plex-episode-prediction" | "episode-prediction" => Arc::new(
-                presets::plex_episode_prediction::PlexEpisodePrediction::new(
-                    config.plex.lookahead, plex_blocklist, rolling_buffer,
+                presets::plex_episode_prediction::PlexEpisodePrediction::new_with_process_policy(
+                    config.plex.lookahead, plex_allowlist, plex_blocklist, rolling_buffer,
                 ),
             ),
             "prefetch" => {
                 let mode = presets::prefetch::parse_mode(&config.prefetch.mode)
                     .map_err(|e| anyhow::anyhow!("[{}] {}", mount_name, e))?;
                 Arc::new(
-                    presets::prefetch::Prefetch::new(
+                    presets::prefetch::Prefetch::new_with_process_policy(
                         mode,
                         config.prefetch.max_depth,
+                        config.prefetch.process_allowlist.clone(),
                         config.prefetch.process_blocklist.clone(),
                         &config.prefetch.file_whitelist,
                         &config.prefetch.file_blacklist,
@@ -392,8 +397,11 @@ async fn run_daemon(config_path: Option<PathBuf>) -> anyhow::Result<()> {
                     mount_name, other
                 );
                 Arc::new(
-                    presets::plex_episode_prediction::PlexEpisodePrediction::new(
-                        config.plex.lookahead, plex_blocklist, rolling_buffer,
+                    presets::plex_episode_prediction::PlexEpisodePrediction::new_with_process_policy(
+                        config.plex.lookahead,
+                        config.plex.process_allowlist.clone(),
+                        config.plex.process_blocklist.clone(),
+                        rolling_buffer,
                     ),
                 )
             }

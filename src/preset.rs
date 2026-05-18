@@ -25,12 +25,41 @@ impl ProcessInfo {
 
     /// Returns true if this process or any ancestor is in `blocklist`.
     pub fn is_blocked_by(&self, blocklist: &[String]) -> bool {
+        self.matches_any(blocklist)
+    }
+
+    /// Returns true if this process or any ancestor is in `names`.
+    pub fn matches_any(&self, names: &[String]) -> bool {
         if let Some(ref name) = self.name {
-            if blocklist.iter().any(|b| name == b) {
+            if names.iter().any(|n| name == n) {
                 return true;
             }
         }
-        self.ancestors.iter().any(|a| blocklist.iter().any(|b| a == b))
+        self.ancestors.iter().any(|a| names.iter().any(|n| a == n))
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ProcessFilterPolicy {
+    pub allowlist: Vec<String>,
+    pub blocklist: Vec<String>,
+}
+
+impl ProcessFilterPolicy {
+    pub fn new(allowlist: Vec<String>, blocklist: Vec<String>) -> Self {
+        Self { allowlist, blocklist }
+    }
+
+    /// Returns true when explicit process policy should suppress caching.
+    ///
+    /// A non-empty allowlist is authoritative: listed processes and their children
+    /// are allowed, all others are filtered. If no allowlist is configured, the
+    /// blocklist filters matching processes and their children.
+    pub fn should_filter(&self, process: &ProcessInfo) -> bool {
+        if !self.allowlist.is_empty() {
+            return !process.matches_any(&self.allowlist);
+        }
+        !self.blocklist.is_empty() && process.is_blocked_by(&self.blocklist)
     }
 }
 
@@ -108,5 +137,44 @@ pub trait CachePreset: Send + Sync + 'static {
     /// Override to group related paths (e.g. by show directory).
     fn deduplicate_key(&self, path: &Path) -> PathBuf {
         path.to_path_buf()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ProcessFilterPolicy, ProcessInfo};
+
+    fn process(name: &str, ancestors: Vec<&str>) -> ProcessInfo {
+        ProcessInfo {
+            pid: 0,
+            name: Some(name.to_string()),
+            cmdline: None,
+            ancestors: ancestors.into_iter().map(String::from).collect(),
+        }
+    }
+
+    #[test]
+    fn empty_process_policy_allows_everything() {
+        let policy = ProcessFilterPolicy::default();
+        assert!(!policy.should_filter(&process("cat", vec![])));
+    }
+
+    #[test]
+    fn process_blocklist_filters_process_and_children() {
+        let policy = ProcessFilterPolicy::new(Vec::new(), vec!["scanner".to_string()]);
+        assert!(policy.should_filter(&process("scanner", vec![])));
+        assert!(policy.should_filter(&process("ffmpeg", vec!["scanner"])));
+        assert!(!policy.should_filter(&process("plex", vec![])));
+    }
+
+    #[test]
+    fn process_allowlist_is_authoritative() {
+        let policy = ProcessFilterPolicy::new(
+            vec!["plex".to_string()],
+            vec!["plex".to_string(), "scanner".to_string()],
+        );
+        assert!(!policy.should_filter(&process("plex", vec![])));
+        assert!(!policy.should_filter(&process("ffmpeg", vec!["plex"])));
+        assert!(policy.should_filter(&process("scanner", vec![])));
     }
 }

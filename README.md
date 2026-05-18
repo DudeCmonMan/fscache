@@ -66,9 +66,10 @@ General-purpose preset with three caching modes and optional regex filtering. No
 
 **Filtering:**
 
-- **`file_whitelist`** — regex patterns matched against filename. Only matching files are cached. Empty list means allow all.
-- **`file_blacklist`** — regex patterns matched against filename. Matching files are never cached. Blacklist is checked first and always wins over whitelist.
-- **`process_blocklist`** — process names (and their children) that must never trigger caching.
+- **`file_whitelist`** — regex patterns matched against filename. Only matching files are cached. If set, it takes priority over `file_blacklist`.
+- **`file_blacklist`** — regex patterns matched against filename. Matching files are never cached when `file_whitelist` is empty.
+- **`process_allowlist`** — process names (and their children) allowed to trigger caching. If set, it takes priority over `process_blocklist`.
+- **`process_blocklist`** — process names (and their children) that must never trigger caching when `process_allowlist` is empty.
 
 All regex patterns are compiled at startup. Invalid patterns cause the daemon to refuse to start — no silent failures at runtime.
 
@@ -187,7 +188,8 @@ Used when `preset.name` is `plex-episode-prediction` (or `episode-prediction`).
 |---|---|---|
 | `plex.lookahead` | `4` | Episodes to pre-cache ahead of current position |
 | `plex.mode` | `miss-only` | `miss-only` (predict on miss) or `rolling-buffer` (keep next N always loaded) |
-| `plex.process_blocklist` | `[]` | Process names that must never trigger prediction |
+| `plex.process_allowlist` | `[]` | Advanced: process names allowed to trigger prediction; overrides `process_blocklist`. Leave empty for normal Plex use. |
+| `plex.process_blocklist` | `[]` | Process names that must never trigger prediction when `process_allowlist` is empty |
 
 ### Prefetch
 
@@ -197,9 +199,10 @@ Used when `preset.name` is `prefetch`.
 |---|---|---|
 | `prefetch.mode` | `cache-hit-only` | `cache-hit-only`, `cache-neighbors`, or `cache-parent-recursively` |
 | `prefetch.max_depth` | `3` | Max recursion depth for `cache-parent-recursively` mode |
-| `prefetch.process_blocklist` | `[]` | Process names that must never trigger caching |
-| `prefetch.file_whitelist` | `[]` | Regex patterns — only matching filenames are cached (empty = allow all) |
-| `prefetch.file_blacklist` | `[]` | Regex patterns — matching filenames are never cached (checked before whitelist) |
+| `prefetch.process_allowlist` | `[]` | Process names allowed to trigger caching; takes priority over `process_blocklist` |
+| `prefetch.process_blocklist` | `[]` | Process names that must never trigger caching when `process_allowlist` is empty |
+| `prefetch.file_whitelist` | `[]` | Regex patterns — only matching filenames are cached; takes priority over `file_blacklist` |
+| `prefetch.file_blacklist` | `[]` | Regex patterns — matching filenames are never cached when `file_whitelist` is empty |
 
 ### Eviction
 
@@ -263,6 +266,7 @@ name = "plex-episode-prediction"
 [plex]
 lookahead         = 4
 mode              = "miss-only"
+process_allowlist = []  # leave empty for normal Plex use; broad entries can allow scanner-spawned transcoders
 process_blocklist = ["Plex Media Scanner", "Plex EAE Service", "Plex Media Fingerprinter"]
 
 [eviction]
@@ -302,7 +306,7 @@ name = "prefetch"
 mode              = "cache-neighbors"
 max_depth         = 3
 file_blacklist    = ["\\.nfo$", "\\.jpg$"]
-# file_whitelist  = ["\\.mkv$", "\\.mp4$"]
+# file_whitelist  = ["\\.mkv$", "\\.mp4$"]  # takes priority over file_blacklist when set
 ```
 
 ---
@@ -364,7 +368,7 @@ Scrollable ring buffer of the 200 most recent daemon log lines, color-coded by l
 
 Discovery mode answers one question: *which processes are actually touching my files?* While armed, every FUSE metadata op and open() is attributed to the calling process. Counts are aggregated in memory, flushed to the cache DB on a fixed interval, and also written as human-readable `NEW` / `SNAP` lines to a dedicated rotating log at `{log_directory}/{instance_name}-discovery.log`.
 
-It's **off by default** and safe to flip on and off at runtime — no restart needed. Useful for tuning `process_blocklist`, spotting unexpected scanners, or just sanity-checking what Plex (or anything else) is hitting your mount.
+It's **off by default** and safe to flip on and off at runtime — no restart needed. Useful for tuning `process_allowlist` / `process_blocklist`, spotting unexpected scanners, or just sanity-checking what Plex (or anything else) is hitting your mount.
 
 ### Quickstart
 

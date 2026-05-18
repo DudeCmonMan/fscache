@@ -28,7 +28,7 @@ use fscache::ipc::protocol::{
 };
 use fscache::ipc::server::run_ipc_server;
 use fscache::ipc::{framed_split, recv_msg, send_msg};
-use fscache::preset::ProcessInfo;
+use fscache::preset::{ProcessFilterPolicy, ProcessInfo};
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -271,6 +271,44 @@ async fn log_open_emits_new_once_per_process() {
     assert!(
         snap_lines.iter().any(|l| l.contains("cat")),
         "SNAP line should mention 'cat'; got: {snap_lines:?}",
+    );
+}
+
+#[tokio::test]
+async fn log_open_marks_non_allowlisted_process_as_blocked() {
+    let (buf, _guard) = capture_discovery_trace();
+    let (tx, _rx) = broadcast::channel(64);
+    let root = CancellationToken::new();
+    let ctrl = DiscoveryController::new_with_process_policy(
+        default_config(),
+        in_memory_db(),
+        Arc::new(ProcessFilterPolicy::new(vec!["plex".to_string()], vec![])),
+        root,
+        tx,
+    );
+
+    ctrl.start().unwrap();
+    ctrl.log_open(&fake_process("cat", 42), OpenOutcome::Hit);
+    ctrl.stop();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let lines = captured_lines(&buf);
+    let new_lines: Vec<_> = lines.iter().filter(|l| l.contains("NEW")).collect();
+    assert_eq!(new_lines.len(), 1, "expected one NEW line, got: {new_lines:?}");
+    assert!(new_lines[0].contains("cat"), "NEW line should mention 'cat'");
+    assert!(
+        new_lines[0].contains("  *     "),
+        "NEW line should mark non-allowlisted process as blocked; got: {:?}",
+        new_lines[0],
+    );
+
+    let snap_lines: Vec<_> = lines.iter().filter(|l| l.contains("SNAP")).collect();
+    assert_eq!(snap_lines.len(), 1, "expected one SNAP line, got: {snap_lines:?}");
+    assert!(snap_lines[0].contains("cat"), "SNAP line should mention 'cat'");
+    assert!(
+        snap_lines[0].contains("  *  "),
+        "SNAP line should mark non-allowlisted process as blocked; got: {:?}",
+        snap_lines[0],
     );
 }
 

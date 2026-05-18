@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use crate::preset::{CacheAction, CachePreset, ProcessInfo, RuleContext};
+use crate::preset::{CacheAction, CachePreset, ProcessFilterPolicy, ProcessInfo, RuleContext};
 use crate::prediction_utils;
 
 /// SxxExx episode prediction with Plex Transcoder awareness.
@@ -21,14 +21,27 @@ use crate::prediction_utils;
 /// the presence of any streaming format takes precedence and keeps the open un-filtered.
 pub struct PlexEpisodePrediction {
     pub lookahead: usize,
-    pub blocklist: Vec<String>,
+    pub process_policy: ProcessFilterPolicy,
     /// If true, on_hit() also triggers lookahead — keeps the next N episodes always loaded.
     pub rolling_buffer: bool,
 }
 
 impl PlexEpisodePrediction {
     pub fn new(lookahead: usize, blocklist: Vec<String>, rolling_buffer: bool) -> Self {
-        Self { lookahead, blocklist, rolling_buffer }
+        Self::new_with_process_policy(lookahead, Vec::new(), blocklist, rolling_buffer)
+    }
+
+    pub fn new_with_process_policy(
+        lookahead: usize,
+        process_allowlist: Vec<String>,
+        process_blocklist: Vec<String>,
+        rolling_buffer: bool,
+    ) -> Self {
+        Self {
+            lookahead,
+            process_policy: ProcessFilterPolicy::new(process_allowlist, process_blocklist),
+            rolling_buffer,
+        }
     }
 }
 
@@ -53,8 +66,8 @@ impl CachePreset for PlexEpisodePrediction {
     }
 
     fn should_filter(&self, process: &ProcessInfo) -> bool {
-        // Check the explicit blocklist (Scanner, EAE Service, Fingerprinter, etc.).
-        if !self.blocklist.is_empty() && process.is_blocked_by(&self.blocklist) {
+        // Check explicit process policy (allowlist first, then blocklist).
+        if self.process_policy.should_filter(process) {
             return true;
         }
         // Plex Transcoder: cache only if the cmdline positively proves streamed playback.
@@ -226,6 +239,30 @@ mod tests {
     fn blocklist_blocks_scanner() {
         let preset = PlexEpisodePrediction::new(4, vec!["Plex Media Scanner".into()], false);
         assert!(preset.should_filter(&other_process("Plex Media Scanner")));
+    }
+
+    #[test]
+    fn allowlist_beats_blocklist() {
+        let preset = PlexEpisodePrediction::new_with_process_policy(
+            4,
+            vec!["Plex Media Server".into()],
+            vec!["Plex Media Server".into()],
+            false,
+        );
+        assert!(!preset.should_filter(&other_process("Plex Media Server")));
+        assert!(preset.should_filter(&other_process("Plex Media Scanner")));
+    }
+
+    #[test]
+    fn allowlist_does_not_bypass_transcoder_safety_filter() {
+        let preset = PlexEpisodePrediction::new_with_process_policy(
+            4,
+            vec!["Plex Transcoder".into()],
+            vec![],
+            false,
+        );
+        let cmdline = b"Plex Transcoder\0-i\0input.mkv\0-vn\0-f\0null\0-";
+        assert!(preset.should_filter(&transcoder(cmdline)));
     }
 
 }

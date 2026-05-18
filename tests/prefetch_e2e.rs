@@ -219,7 +219,7 @@ fn test_cache_neighbors_blacklist() {
 }
 
 #[test]
-fn test_cache_neighbors_blacklist_takes_precedence_over_whitelist() {
+fn test_cache_neighbors_whitelist_takes_precedence_over_blacklist() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
     std::fs::write(dir.join("ep01.mkv"), b"data").unwrap();
@@ -229,10 +229,13 @@ fn test_cache_neighbors_blacklist_takes_precedence_over_whitelist() {
     let db = in_memory_db();
     let ctx = RuleContext { backing_store: &bs, cache_db: &db };
 
-    // Both whitelist and blacklist match .mkv — blacklist wins, nothing passes.
+    // Both whitelist and blacklist match .mkv — whitelist wins.
     let preset = make_prefetch(PrefetchMode::CacheNeighbors, 3, &[r"\.mkv$"], &[r"\.mkv$"]);
     let files = cache_files(preset.on_miss(Path::new("ep01.mkv"), &ctx));
-    assert!(files.is_empty(), "blacklist should take precedence over whitelist");
+    assert_eq!(files, vec![
+        PathBuf::from("ep01.mkv"),
+        PathBuf::from("ep02.mkv"),
+    ]);
 }
 
 #[test]
@@ -439,6 +442,35 @@ fn test_blocklist_filters_process() {
     assert!(preset.should_filter(&blocked), "blocked process should be filtered");
     assert!(!preset.should_filter(&allowed), "unrelated process should not be filtered");
     assert!(preset.should_filter(&child_of_blocked), "child of blocked process should be filtered");
+}
+
+#[test]
+fn test_allowlist_takes_precedence_over_blocklist() {
+    let preset = Prefetch::new_with_process_policy(
+        PrefetchMode::CacheHitOnly,
+        3,
+        vec!["Plex Media Server".to_string()],
+        vec!["Plex Media Server".to_string()],
+        &[],
+        &[],
+    )
+    .unwrap();
+
+    let allowed = ProcessInfo {
+        pid: 1,
+        name: Some("Plex Media Server".to_string()),
+        cmdline: None,
+        ancestors: vec![],
+    };
+    let not_allowed = ProcessInfo {
+        pid: 2,
+        name: Some("Plex Media Scanner".to_string()),
+        cmdline: None,
+        ancestors: vec![],
+    };
+
+    assert!(!preset.should_filter(&allowed), "allowlist should beat blocklist");
+    assert!(preset.should_filter(&not_allowed), "non-allowlisted process should be filtered");
 }
 
 #[test]

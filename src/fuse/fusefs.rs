@@ -29,9 +29,9 @@ const TTL: Duration = Duration::from_secs(1);
 ///
 /// Note: `Filtered` means the preset's `should_filter` returned true — a runtime,
 /// preset-driven decision. This is distinct from the discovery `BLK` column which
-/// reflects whether the process name appears in the config's `process_blocklist`.
-/// They overlap but are not equivalent (e.g. PlexEpisodePrediction also filters
-/// Plex Transcoder via cmdline inspection, independent of the blocklist).
+/// reflects only explicit process allow/block policy. They overlap but are not
+/// equivalent (e.g. PlexEpisodePrediction also filters Plex Transcoder via cmdline
+/// inspection, independent of explicit process policy).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenOutcome {
     /// Served from the SSD cache.
@@ -660,4 +660,3 @@ fn mode_to_filetype(mode: libc::mode_t) -> FileType {
         _              => FileType::RegularFile,
     }
 }
-

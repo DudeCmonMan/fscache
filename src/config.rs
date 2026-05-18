@@ -186,14 +186,19 @@ pub struct PrefetchConfig {
     #[serde(default = "default_max_depth")]
     pub max_depth: usize,
     /// Process binary names (and their children) that must never trigger caching.
+    /// Ignored when process_allowlist is non-empty.
     #[serde(default)]
     pub process_blocklist: Vec<String>,
+    /// Process binary names (and their children) allowed to trigger caching.
+    /// If non-empty, this takes priority over process_blocklist.
+    #[serde(default)]
+    pub process_allowlist: Vec<String>,
     /// Regex patterns (matched against filename) — only matching files are cached.
-    /// Ignored if file_blacklist is non-empty and the file matches the blacklist.
+    /// If non-empty, this takes priority over file_blacklist.
     #[serde(default)]
     pub file_whitelist: Vec<String>,
     /// Regex patterns (matched against filename) — matching files are never cached.
-    /// Blacklist is checked before whitelist.
+    /// Ignored when file_whitelist is non-empty.
     #[serde(default)]
     pub file_blacklist: Vec<String>,
 }
@@ -204,6 +209,7 @@ impl Default for PrefetchConfig {
             mode: default_prefetch_mode(),
             max_depth: default_max_depth(),
             process_blocklist: Vec::new(),
+            process_allowlist: Vec::new(),
             file_whitelist: Vec::new(),
             file_blacklist: Vec::new(),
         }
@@ -233,8 +239,13 @@ pub struct PlexConfig {
     #[serde(default = "default_plex_mode")]
     pub mode: String,
     /// Process binary names (and their children) that must never trigger prediction.
+    /// Ignored when process_allowlist is non-empty.
     #[serde(default)]
     pub process_blocklist: Vec<String>,
+    /// Process binary names (and their children) allowed to trigger prediction.
+    /// If non-empty, this takes priority over process_blocklist.
+    #[serde(default)]
+    pub process_allowlist: Vec<String>,
 }
 
 impl Default for PlexConfig {
@@ -243,6 +254,7 @@ impl Default for PlexConfig {
             lookahead: default_lookahead(),
             mode: default_plex_mode(),
             process_blocklist: Vec::new(),
+            process_allowlist: Vec::new(),
         }
     }
 }

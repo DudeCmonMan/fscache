@@ -23,6 +23,13 @@ impl ProcessInfo {
         Self { pid, name, cmdline, ancestors }
     }
 
+    /// Returns true if the opener process is in `names`.
+    pub fn matches_opener(&self, names: &[String]) -> bool {
+        self.name
+            .as_ref()
+            .is_some_and(|name| names.iter().any(|n| name == n))
+    }
+
     /// Returns true if this process or any ancestor is in `blocklist`.
     pub fn is_blocked_by(&self, blocklist: &[String]) -> bool {
         self.matches_any(blocklist)
@@ -30,10 +37,8 @@ impl ProcessInfo {
 
     /// Returns true if this process or any ancestor is in `names`.
     pub fn matches_any(&self, names: &[String]) -> bool {
-        if let Some(ref name) = self.name {
-            if names.iter().any(|n| name == n) {
-                return true;
-            }
+        if self.matches_opener(names) {
+            return true;
         }
         self.ancestors.iter().any(|a| names.iter().any(|n| a == n))
     }
@@ -52,14 +57,13 @@ impl ProcessFilterPolicy {
 
     /// Returns true when explicit process policy should suppress caching.
     ///
-    /// A non-empty allowlist is authoritative: listed processes and their children
-    /// are allowed, all others are filtered. If no allowlist is configured, the
-    /// blocklist filters matching processes and their children.
+    /// The blocklist always checks the opener and ancestors. A non-empty
+    /// allowlist then requires the opener process itself to match.
     pub fn should_filter(&self, process: &ProcessInfo) -> bool {
-        if !self.allowlist.is_empty() {
-            return !process.matches_any(&self.allowlist);
+        if !self.blocklist.is_empty() && process.is_blocked_by(&self.blocklist) {
+            return true;
         }
-        !self.blocklist.is_empty() && process.is_blocked_by(&self.blocklist)
+        !self.allowlist.is_empty() && !process.matches_opener(&self.allowlist)
     }
 }
 
@@ -168,13 +172,21 @@ mod tests {
     }
 
     #[test]
-    fn process_allowlist_is_authoritative() {
-        let policy = ProcessFilterPolicy::new(
-            vec!["plex".to_string()],
-            vec!["plex".to_string(), "scanner".to_string()],
-        );
+    fn process_allowlist_matches_opener_only() {
+        let policy = ProcessFilterPolicy::new(vec!["plex".to_string()], Vec::new());
         assert!(!policy.should_filter(&process("plex", vec![])));
-        assert!(!policy.should_filter(&process("ffmpeg", vec!["plex"])));
+        assert!(policy.should_filter(&process("ffmpeg", vec!["plex"])));
         assert!(policy.should_filter(&process("scanner", vec![])));
+    }
+
+    #[test]
+    fn process_blocklist_vetoes_allowlisted_opener() {
+        let policy = ProcessFilterPolicy::new(
+            vec!["Plex Transcoder".to_string()],
+            vec!["scanner".to_string(), "blocked".to_string()],
+        );
+        assert!(!policy.should_filter(&process("Plex Transcoder", vec![])));
+        assert!(policy.should_filter(&process("Plex Transcoder", vec!["scanner"])));
+        assert!(policy.should_filter(&process("blocked", vec![])));
     }
 }

@@ -275,7 +275,7 @@ async fn log_open_emits_new_once_per_process() {
 }
 
 #[tokio::test]
-async fn log_open_marks_non_allowlisted_process_as_blocked() {
+async fn log_open_marks_non_allowlisted_process_as_filtered() {
     let (buf, _guard) = capture_discovery_trace();
     let (tx, _rx) = broadcast::channel(64);
     let root = CancellationToken::new();
@@ -298,7 +298,7 @@ async fn log_open_marks_non_allowlisted_process_as_blocked() {
     assert!(new_lines[0].contains("cat"), "NEW line should mention 'cat'");
     assert!(
         new_lines[0].contains("  *     "),
-        "NEW line should mark non-allowlisted process as blocked; got: {:?}",
+        "NEW line should mark non-allowlisted process as filtered; got: {:?}",
         new_lines[0],
     );
 
@@ -307,7 +307,7 @@ async fn log_open_marks_non_allowlisted_process_as_blocked() {
     assert!(snap_lines[0].contains("cat"), "SNAP line should mention 'cat'");
     assert!(
         snap_lines[0].contains("  *  "),
-        "SNAP line should mark non-allowlisted process as blocked; got: {:?}",
+        "SNAP line should mark non-allowlisted process as filtered; got: {:?}",
         snap_lines[0],
     );
 }
@@ -383,7 +383,7 @@ async fn snap_and_new_tracing_format() {
     assert!(!snap_lines.is_empty(), "expected SNAP lines after stop flush");
 
     // Each SNAP line should have at least 5 whitespace-delimited non-empty tokens
-    // (time, "SNAP", process_name, blocked_marker, hit, miss, meta, total).
+    // (time, "SNAP", process_name, filtered_marker, hit, miss, meta, total).
     for snap in &snap_lines {
         let tokens: Vec<_> = snap.split_whitespace().collect();
         assert!(

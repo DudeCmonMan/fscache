@@ -918,8 +918,8 @@ sudo cp target/release/fscache /usr/local/bin/</code><span class="label">bash</s
         <ul>
           <li><code>file_whitelist</code> — regex patterns, only matching files are cached; takes priority over <code>file_blacklist</code></li>
           <li><code>file_blacklist</code> — regex patterns, matching files are never cached when <code>file_whitelist</code> is empty</li>
-          <li><code>process_allowlist</code> — process names allowed to trigger caching; takes priority over <code>process_blocklist</code></li>
-          <li><code>process_blocklist</code> — process names that must never trigger caching when <code>process_allowlist</code> is empty</li>
+          <li><code>process_allowlist</code> — opener process names allowed to trigger caching</li>
+          <li><code>process_blocklist</code> — opener or ancestor process names that must never trigger caching</li>
         </ul>
       </div>
 
@@ -960,8 +960,8 @@ sudo cp target/release/fscache /usr/local/bin/</code><span class="label">bash</s
       <tbody>
         <tr><td><code>plex.lookahead</code></td><td><code>4</code></td><td>Episodes to pre-cache ahead of current position</td></tr>
         <tr><td><code>plex.mode</code></td><td><code>miss-only</code></td><td><code>miss-only</code> or <code>rolling-buffer</code></td></tr>
-        <tr><td><code>plex.process_allowlist</code></td><td><code>[]</code></td><td>Advanced: process names allowed to trigger prediction; overrides <code>process_blocklist</code>. Leave empty for normal Plex use; broad entries can allow scanner-spawned transcoders.</td></tr>
-        <tr><td><code>plex.process_blocklist</code></td><td><code>[]</code></td><td>Process names that must never trigger prediction when <code>process_allowlist</code> is empty</td></tr>
+        <tr><td><code>plex.process_allowlist</code></td><td><code>[]</code></td><td>Advanced: opener process names allowed to trigger prediction. Leave empty for normal Plex use.</td></tr>
+        <tr><td><code>plex.process_blocklist</code></td><td><code>[]</code></td><td>Opener or ancestor process names that must never trigger prediction</td></tr>
       </tbody>
     </table>
     </div>
@@ -973,8 +973,8 @@ sudo cp target/release/fscache /usr/local/bin/</code><span class="label">bash</s
       <tbody>
         <tr><td><code>prefetch.mode</code></td><td><code>cache-hit-only</code></td><td><code>cache-hit-only</code>, <code>cache-neighbors</code>, or <code>cache-parent-recursively</code></td></tr>
         <tr><td><code>prefetch.max_depth</code></td><td><code>3</code></td><td>Max recursion depth for <code>cache-parent-recursively</code></td></tr>
-        <tr><td><code>prefetch.process_allowlist</code></td><td><code>[]</code></td><td>Process names allowed to trigger caching; takes priority over <code>process_blocklist</code></td></tr>
-        <tr><td><code>prefetch.process_blocklist</code></td><td><code>[]</code></td><td>Process names that must never trigger caching when <code>process_allowlist</code> is empty</td></tr>
+        <tr><td><code>prefetch.process_allowlist</code></td><td><code>[]</code></td><td>Opener process names allowed to trigger caching</td></tr>
+        <tr><td><code>prefetch.process_blocklist</code></td><td><code>[]</code></td><td>Opener or ancestor process names that must never trigger caching</td></tr>
         <tr><td><code>prefetch.file_whitelist</code></td><td><code>[]</code></td><td>Regex patterns — only matching filenames cached; takes priority over <code>file_blacklist</code></td></tr>
         <tr><td><code>prefetch.file_blacklist</code></td><td><code>[]</code></td><td>Regex patterns — matching filenames never cached when <code>file_whitelist</code> is empty</td></tr>
       </tbody>
@@ -1063,7 +1063,7 @@ sudo cp target/release/fscache /usr/local/bin/</code><span class="label">bash</s
 <span class="c-kw">[plex]</span>
 <span class="c-fn">lookahead</span>         = <span class="c-val">4</span>
 <span class="c-fn">mode</span>              = <span class="c-str">"miss-only"</span>
-<span class="c-fn">process_allowlist</span> = [] <span class="c-cmt"># leave empty; broad entries can allow scanner-spawned transcoders</span>
+<span class="c-fn">process_allowlist</span> = [] <span class="c-cmt"># leave empty; opener-only allowlist, blocklisted ancestors still veto</span>
 <span class="c-fn">process_blocklist</span> = [<span class="c-str">"Plex Media Scanner"</span>, <span class="c-str">"Plex EAE Service"</span>, <span class="c-str">"Plex Media Fingerprinter"</span>]
 
 <span class="c-kw">[eviction]</span>

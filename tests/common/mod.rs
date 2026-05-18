@@ -339,6 +339,7 @@ impl OvermountHarness {
         let mut config = fuser::Config::default();
         config.mount_options = vec![
             MountOption::RO,
+            MountOption::CUSTOM("nonempty".to_string()),
             MountOption::FSName("fscache-overmount-test".to_string()),
         ];
         config.acl = SessionACL::Owner;

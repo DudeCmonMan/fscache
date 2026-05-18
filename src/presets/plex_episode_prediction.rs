@@ -66,7 +66,7 @@ impl CachePreset for PlexEpisodePrediction {
     }
 
     fn should_filter(&self, process: &ProcessInfo) -> bool {
-        // Check explicit process policy (allowlist first, then blocklist).
+        // Check explicit process policy before Plex Transcoder cmdline safety.
         if self.process_policy.should_filter(process) {
             return true;
         }
@@ -133,6 +133,24 @@ mod tests {
             name: Some(name.into()),
             cmdline: Some(b"some\0args".to_vec()),
             ancestors: vec![],
+        }
+    }
+
+    fn transcoder_with_ancestors(cmdline: &[u8], ancestors: Vec<&str>) -> ProcessInfo {
+        ProcessInfo {
+            pid: 0,
+            name: Some("Plex Transcoder".into()),
+            cmdline: Some(cmdline.to_vec()),
+            ancestors: ancestors.into_iter().map(String::from).collect(),
+        }
+    }
+
+    fn other_process_with_ancestors(name: &str, ancestors: Vec<&str>) -> ProcessInfo {
+        ProcessInfo {
+            pid: 0,
+            name: Some(name.into()),
+            cmdline: Some(b"some\0args".to_vec()),
+            ancestors: ancestors.into_iter().map(String::from).collect(),
         }
     }
 
@@ -242,15 +260,47 @@ mod tests {
     }
 
     #[test]
-    fn allowlist_beats_blocklist() {
+    fn blocklist_vetoes_allowlisted_opener() {
+        let preset = PlexEpisodePrediction::new_with_process_policy(
+            4,
+            vec!["Plex Transcoder".into()],
+            vec!["Plex Fingerprinting Service".into()],
+            false,
+        );
+        let cmdline = b"Plex Transcoder\0-i\0input.mkv\0-f\0dash\0manifest.mpd";
+        assert!(preset.should_filter(&transcoder_with_ancestors(
+            cmdline,
+            vec!["Plex Fingerprinting Service", "Plex Media Server"],
+        )));
+    }
+
+    #[test]
+    fn allowlisted_transcoder_with_safe_ancestry_and_playback_cmdline_is_allowed() {
+        let preset = PlexEpisodePrediction::new_with_process_policy(
+            4,
+            vec!["Plex Transcoder".into()],
+            vec!["Plex Fingerprinting Service".into()],
+            false,
+        );
+        let cmdline = b"Plex Transcoder\0-i\0input.mkv\0-f\0dash\0manifest.mpd";
+        assert!(!preset.should_filter(&transcoder_with_ancestors(
+            cmdline,
+            vec!["Plex Media Server"],
+        )));
+    }
+
+    #[test]
+    fn allowlisted_ancestor_does_not_allow_opener() {
         let preset = PlexEpisodePrediction::new_with_process_policy(
             4,
             vec!["Plex Media Server".into()],
-            vec!["Plex Media Server".into()],
+            vec![],
             false,
         );
-        assert!(!preset.should_filter(&other_process("Plex Media Server")));
-        assert!(preset.should_filter(&other_process("Plex Media Scanner")));
+        assert!(preset.should_filter(&other_process_with_ancestors(
+            "Plex Transcoder",
+            vec!["Plex Media Server"],
+        )));
     }
 
     #[test]

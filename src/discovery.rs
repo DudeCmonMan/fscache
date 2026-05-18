@@ -125,9 +125,9 @@ impl DiscoveryController {
         if session.seen.insert(name.clone()) {
             let (cmdline, ancestors) = format_process_info(info);
             session.samples.insert(name.clone(), (Some(cmdline.clone()), Some(ancestors.clone())));
-            let blocked = session.process_policy.should_filter(info);
-            session.blocked.insert(name.clone(), blocked);
-            emit_new(info, &name, &ancestors, &cmdline, blocked);
+            let filtered = session.process_policy.should_filter(info);
+            session.filtered.insert(name.clone(), filtered);
+            emit_new(info, &name, &ancestors, &cmdline, filtered);
         }
 
         session.bump(&name, op);
@@ -148,7 +148,7 @@ impl DiscoveryController {
             child_token: child_token.clone(),
             counts: Arc::new(DashMap::new()),
             samples: Arc::new(DashMap::new()),
-            blocked: Arc::new(DashMap::new()),
+            filtered: Arc::new(DashMap::new()),
             seen: Arc::new(DashSet::new()),
             pid_lru: Arc::new(Mutex::new(LruCache::new(lru_cap))),
             process_policy: Arc::clone(&self.process_policy),
@@ -210,7 +210,7 @@ struct Session {
     child_token: CancellationToken,
     counts: Arc<DashMap<(Arc<str>, OpKind), AtomicU64>>,
     samples: Arc<DashMap<Arc<str>, (Option<String>, Option<String>)>>,
-    blocked: Arc<DashMap<Arc<str>, bool>>,
+    filtered: Arc<DashMap<Arc<str>, bool>>,
     seen: Arc<DashSet<Arc<str>>>,
     pid_lru: Arc<Mutex<LruCache<u32, Arc<ProcessInfo>>>>,
     process_policy: Arc<ProcessFilterPolicy>,
@@ -230,9 +230,9 @@ impl Session {
         if self.seen.insert(name.clone()) {
             let (cmdline, ancestors) = format_process_info(&info);
             self.samples.insert(name.clone(), (Some(cmdline.clone()), Some(ancestors.clone())));
-            let blocked = self.process_policy.should_filter(&info);
-            self.blocked.insert(name.clone(), blocked);
-            emit_new(&info, &name, &ancestors, &cmdline, blocked);
+            let filtered = self.process_policy.should_filter(&info);
+            self.filtered.insert(name.clone(), filtered);
+            emit_new(&info, &name, &ancestors, &cmdline, filtered);
         }
         info
     }
@@ -309,7 +309,7 @@ async fn flush_bucket(session: &Session, db: Arc<CacheDb>) {
             _ => {}
         }
     }
-    emit_snap(&by_process, &session.blocked, &session.process_policy);
+    emit_snap(&by_process, &session.filtered, &session.process_policy);
 
     let _ = tokio::task::spawn_blocking(move || db.upsert_process_access(&rows)).await;
 }
@@ -319,21 +319,21 @@ fn emit_new(
     name: &str,
     ancestors: &str,
     cmdline: &str,
-    blocked: bool,
+    filtered: bool,
 ) {
     let now = utc_time_hms();
-    let blk = if blocked { "*" } else { "-" };
+    let filter_marker = if filtered { "*" } else { "-" };
     let anc_str = if ancestors.is_empty() { String::new() } else { format!(" anc={ancestors}") };
     let cmd_str = if cmdline.is_empty() { String::new() } else { format!(" cmd={cmdline:?}") };
     tracing::debug!(
         target: "fscache::discovery",
-        "{now}  NEW     {name:<32}  {blk}     -      -      -       -  pid=?{anc_str}{cmd_str}"
+        "{now}  NEW     {name:<32}  {filter_marker}     -      -      -       -  pid=?{anc_str}{cmd_str}"
     );
 }
 
 fn emit_snap(
     by_process: &std::collections::HashMap<&str, [u64; 3]>,
-    blocked_by_process: &DashMap<Arc<str>, bool>,
+    filtered_by_process: &DashMap<Arc<str>, bool>,
     process_policy: &ProcessFilterPolicy,
 ) {
     let now = utc_time_hms();
@@ -348,7 +348,7 @@ fn emit_snap(
         let miss = counts[1];
         let meta = counts[2];
         let total = hit + miss + meta;
-        let blocked = blocked_by_process
+        let filtered = filtered_by_process
             .get(*name)
             .map(|b| *b)
             .unwrap_or_else(|| {
@@ -359,10 +359,10 @@ fn emit_snap(
                     ancestors: vec![],
                 })
             });
-        let blk = if blocked { "*" } else { "-" };
+        let filter_marker = if filtered { "*" } else { "-" };
         tracing::debug!(
             target: "fscache::discovery",
-            "{now}  SNAP    {name:<32}  {blk}  {hit:>6}  {miss:>6}  {meta:>6}  {total:>8}",
+            "{now}  SNAP    {name:<32}  {filter_marker}  {hit:>6}  {miss:>6}  {meta:>6}  {total:>8}",
         );
     }
 }

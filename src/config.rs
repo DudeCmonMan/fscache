@@ -185,12 +185,12 @@ pub struct PrefetchConfig {
     /// Max directory depth for cache-parent-recursively mode.
     #[serde(default = "default_max_depth")]
     pub max_depth: usize,
-    /// Process binary names (and their children) that must never trigger caching.
-    /// Ignored when process_allowlist is non-empty.
+    /// Process binary names that must never trigger caching.
+    /// The opener and all ancestors are checked.
     #[serde(default)]
     pub process_blocklist: Vec<String>,
-    /// Process binary names (and their children) allowed to trigger caching.
-    /// If non-empty, this takes priority over process_blocklist.
+    /// Process binary names allowed to trigger caching.
+    /// Only the opener process is checked; blocklist still applies.
     #[serde(default)]
     pub process_allowlist: Vec<String>,
     /// Regex patterns (matched against filename) — only matching files are cached.
@@ -238,12 +238,12 @@ pub struct PlexConfig {
     /// "rolling-buffer" — also predict on hits, keeping the next N episodes always loaded.
     #[serde(default = "default_plex_mode")]
     pub mode: String,
-    /// Process binary names (and their children) that must never trigger prediction.
-    /// Ignored when process_allowlist is non-empty.
+    /// Process binary names that must never trigger prediction.
+    /// The opener and all ancestors are checked.
     #[serde(default)]
     pub process_blocklist: Vec<String>,
-    /// Process binary names (and their children) allowed to trigger prediction.
-    /// If non-empty, this takes priority over process_blocklist.
+    /// Process binary names allowed to trigger prediction.
+    /// Only the opener process is checked; blocklist still applies.
     #[serde(default)]
     pub process_allowlist: Vec<String>,
 }

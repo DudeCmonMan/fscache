@@ -445,12 +445,12 @@ fn test_blocklist_filters_process() {
 }
 
 #[test]
-fn test_allowlist_takes_precedence_over_blocklist() {
+fn test_blocklist_vetoes_allowlisted_process() {
     let preset = Prefetch::new_with_process_policy(
         PrefetchMode::CacheHitOnly,
         3,
-        vec!["Plex Media Server".to_string()],
-        vec!["Plex Media Server".to_string()],
+        vec!["Plex Transcoder".to_string()],
+        vec!["Plex Media Scanner".to_string()],
         &[],
         &[],
     )
@@ -458,19 +458,26 @@ fn test_allowlist_takes_precedence_over_blocklist() {
 
     let allowed = ProcessInfo {
         pid: 1,
-        name: Some("Plex Media Server".to_string()),
+        name: Some("Plex Transcoder".to_string()),
         cmdline: None,
         ancestors: vec![],
     };
-    let not_allowed = ProcessInfo {
+    let blocked_ancestor = ProcessInfo {
         pid: 2,
-        name: Some("Plex Media Scanner".to_string()),
+        name: Some("Plex Transcoder".to_string()),
         cmdline: None,
-        ancestors: vec![],
+        ancestors: vec!["Plex Media Scanner".to_string(), "Plex Media Server".to_string()],
+    };
+    let allowlisted_ancestor_only = ProcessInfo {
+        pid: 3,
+        name: Some("ffmpeg".to_string()),
+        cmdline: None,
+        ancestors: vec!["Plex Transcoder".to_string()],
     };
 
-    assert!(!preset.should_filter(&allowed), "allowlist should beat blocklist");
-    assert!(preset.should_filter(&not_allowed), "non-allowlisted process should be filtered");
+    assert!(!preset.should_filter(&allowed), "allowlisted opener should pass");
+    assert!(preset.should_filter(&blocked_ancestor), "blocklisted ancestor should veto");
+    assert!(preset.should_filter(&allowlisted_ancestor_only), "allowlist should check opener only");
 }
 
 #[test]

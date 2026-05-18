@@ -68,8 +68,8 @@ General-purpose preset with three caching modes and optional regex filtering. No
 
 - **`file_whitelist`** — regex patterns matched against filename. Only matching files are cached. If set, it takes priority over `file_blacklist`.
 - **`file_blacklist`** — regex patterns matched against filename. Matching files are never cached when `file_whitelist` is empty.
-- **`process_allowlist`** — process names (and their children) allowed to trigger caching. If set, it takes priority over `process_blocklist`.
-- **`process_blocklist`** — process names (and their children) that must never trigger caching when `process_allowlist` is empty.
+- **`process_allowlist`** — process names allowed to trigger caching. Only the opener process is checked.
+- **`process_blocklist`** — opener or ancestor process names that must never trigger caching. If both lists are set, both apply.
 
 All regex patterns are compiled at startup. Invalid patterns cause the daemon to refuse to start — no silent failures at runtime.
 
@@ -188,8 +188,8 @@ Used when `preset.name` is `plex-episode-prediction` (or `episode-prediction`).
 |---|---|---|
 | `plex.lookahead` | `4` | Episodes to pre-cache ahead of current position |
 | `plex.mode` | `miss-only` | `miss-only` (predict on miss) or `rolling-buffer` (keep next N always loaded) |
-| `plex.process_allowlist` | `[]` | Advanced: process names allowed to trigger prediction; overrides `process_blocklist`. Leave empty for normal Plex use. |
-| `plex.process_blocklist` | `[]` | Process names that must never trigger prediction when `process_allowlist` is empty |
+| `plex.process_allowlist` | `[]` | Advanced: opener process names allowed to trigger prediction. Leave empty for normal Plex use. |
+| `plex.process_blocklist` | `[]` | Opener or ancestor process names that must never trigger prediction |
 
 ### Prefetch
 
@@ -199,8 +199,8 @@ Used when `preset.name` is `prefetch`.
 |---|---|---|
 | `prefetch.mode` | `cache-hit-only` | `cache-hit-only`, `cache-neighbors`, or `cache-parent-recursively` |
 | `prefetch.max_depth` | `3` | Max recursion depth for `cache-parent-recursively` mode |
-| `prefetch.process_allowlist` | `[]` | Process names allowed to trigger caching; takes priority over `process_blocklist` |
-| `prefetch.process_blocklist` | `[]` | Process names that must never trigger caching when `process_allowlist` is empty |
+| `prefetch.process_allowlist` | `[]` | Opener process names allowed to trigger caching |
+| `prefetch.process_blocklist` | `[]` | Opener or ancestor process names that must never trigger caching |
 | `prefetch.file_whitelist` | `[]` | Regex patterns — only matching filenames are cached; takes priority over `file_blacklist` |
 | `prefetch.file_blacklist` | `[]` | Regex patterns — matching filenames are never cached when `file_whitelist` is empty |
 
@@ -266,7 +266,7 @@ name = "plex-episode-prediction"
 [plex]
 lookahead         = 4
 mode              = "miss-only"
-process_allowlist = []  # leave empty for normal Plex use; broad entries can allow scanner-spawned transcoders
+process_allowlist = []  # leave empty for normal Plex use; allowlisted openers can still be vetoed by scanner ancestors
 process_blocklist = ["Plex Media Scanner", "Plex EAE Service", "Plex Media Fingerprinter"]
 
 [eviction]

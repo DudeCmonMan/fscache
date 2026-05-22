@@ -44,12 +44,9 @@ use fscache::cache::io::{CacheIO, CacheIoConfig};
 use fscache::cache::manager::CacheManager;
 use fscache::config::InvalidationConfig;
 use fscache::engine::scheduler::Scheduler;
-use tokio_util::sync::CancellationToken;
 use std::os::unix::fs::MetadataExt;
 use std::os::unix::fs::PermissionsExt;
-use filetime;
-
-// ---- helpers ---------------------------------------------------------------
+use tokio_util::sync::CancellationToken;
 
 fn open_backing_store(dir: &std::path::Path) -> Arc<BackingStore> {
     let c = CString::new(dir.as_os_str().as_bytes()).unwrap();
@@ -88,17 +85,15 @@ fn make_cache_mgr(cache_dir: &std::path::Path, db: Arc<CacheDb>) -> Arc<CacheMan
         cache_dir.to_path_buf(),
         db,
         cache_dir.to_path_buf(),
-        1.0,   // max_size_gb
-        9999,  // expiry_hours
-        0.0,   // min_free_space_gb
+        1.0,  // max_size_gb
+        9999, // expiry_hours
+        0.0,  // min_free_space_gb
         None,
         &InvalidationConfig::default(),
     ));
     mgr.startup_cleanup();
     mgr
 }
-
-// ---- tests -----------------------------------------------------------------
 
 /// Submit a real backing file and verify the deferred DB row is written immediately
 /// and then cleaned up after the copy completes successfully.
@@ -121,7 +116,11 @@ async fn deferred_db_row_written_on_submit_and_cleared_after_copy() {
 
     // DB row must exist right after submit (before any copy completes).
     let rows_after_submit = db.load_deferred(1440);
-    assert_eq!(rows_after_submit.len(), 1, "deferred DB row should be written on submit");
+    assert_eq!(
+        rows_after_submit.len(),
+        1,
+        "deferred DB row should be written on submit"
+    );
 
     // Wait for copy_worker to finish.
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -159,7 +158,11 @@ async fn deferred_jobs_rehydrated_from_db_on_spawn() {
     db.save_deferred(&rel, &rel, now);
 
     // Confirm the row is in the DB before spawning.
-    assert_eq!(db.load_deferred(1440).len(), 1, "seeded row should be in DB");
+    assert_eq!(
+        db.load_deferred(1440).len(),
+        1,
+        "seeded row should be in DB"
+    );
 
     // Spawn CacheIO — it should rehydrate the job and process it.
     let cache_mgr = make_cache_mgr(cache_dir.path(), Arc::clone(&db));
@@ -197,7 +200,11 @@ async fn deferred_db_row_cleared_after_copy_failure() {
     cache_io.submit_cache(rel.clone()).await;
 
     // Row should be written immediately on submit.
-    assert_eq!(db.load_deferred(1440).len(), 1, "row should exist right after submit");
+    assert_eq!(
+        db.load_deferred(1440).len(),
+        1,
+        "row should exist right after submit"
+    );
 
     // Wait for copy_worker to fail and call finish_known.
     tokio::time::sleep(Duration::from_millis(500)).await;
@@ -215,7 +222,8 @@ async fn deferred_db_row_cleared_after_copy_failure() {
     cache_io.submit_cache(rel.clone()).await;
     let rows = db.load_deferred(1440);
     assert_eq!(
-        rows.len(), 1,
+        rows.len(),
+        1,
         "after a failed copy the path must be re-submittable (not stuck in known)"
     );
 }
@@ -266,7 +274,8 @@ async fn deferred_db_row_cleared_when_copy_worker_finds_file_already_cached() {
     std::fs::remove_file(&cache_dest).unwrap();
     cache_io.submit_cache(rel.clone()).await;
     assert_eq!(
-        db.load_deferred(1440).len(), 1,
+        db.load_deferred(1440).len(),
+        1,
         "after is_cached short-circuit, the path must be re-submittable (not stuck in known)"
     );
 }
@@ -294,7 +303,8 @@ async fn duplicate_submit_produces_one_copy() {
 
     // Only one deferred row should exist.
     assert_eq!(
-        db.load_deferred(1440).len(), 1,
+        db.load_deferred(1440).len(),
+        1,
         "duplicate submit should produce exactly one deferred DB row"
     );
 
@@ -333,9 +343,12 @@ async fn copy_produces_correct_byte_content() {
 
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    let cached = std::fs::read(cache_dir.path().join(&rel))
-        .expect("cached file not found after copy");
-    assert_eq!(cached, content, "cached file content must be identical to backing file");
+    let cached =
+        std::fs::read(cache_dir.path().join(&rel)).expect("cached file not found after copy");
+    assert_eq!(
+        cached, content,
+        "cached file content must be identical to backing file"
+    );
 }
 
 /// Mode and mtime set on the backing file must survive the CacheIO copy pipeline.
@@ -355,7 +368,8 @@ async fn copy_preserves_metadata() {
     filetime::set_file_mtime(
         &backing_path,
         filetime::FileTime::from_unix_time(1_700_000_000, 0),
-    ).expect("set_file_mtime failed");
+    )
+    .expect("set_file_mtime failed");
 
     let db = make_db(cache_dir.path());
     let cache_mgr = make_cache_mgr(cache_dir.path(), Arc::clone(&db));
@@ -378,7 +392,8 @@ async fn copy_preserves_metadata() {
         "cached file mode must match backing file"
     );
     assert_eq!(
-        cache_meta.mtime(), backing_meta.mtime(),
+        cache_meta.mtime(),
+        backing_meta.mtime(),
         "cached file mtime must match backing file"
     );
 }

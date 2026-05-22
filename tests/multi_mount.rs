@@ -5,7 +5,7 @@ use std::time::Duration;
 use common::{
     MultiFuseHarness, write_multi_backing_file, read_multi_mount_file, collect_files,
 };
-use fscache::cache::db::CacheDb;
+use fscache::cache::db::{CacheDb, SourceMetadata};
 use fscache::utils::{mount_cache_name, validate_targets};
 
 // ---------------------------------------------------------------------------
@@ -307,7 +307,7 @@ fn global_eviction_respects_total_budget() {
         for file_idx in 0..2u32 {
             let rel_str = format!("file{file_idx}.mkv");
             let rel = std::path::Path::new(&rel_str);
-            mgr.mark_cached(rel, content.len() as u64, 0, 0);
+            mgr.mark_cached(rel, SourceMetadata::test_file(content.len() as u64, 0, 0));
             // Stagger timestamps so LRU ordering is deterministic.
             let ts = now - (mount_idx as i64 * 2 + file_idx as i64) * 10;
             let mount_id = harness.cache_subdir(mount_idx).to_string_lossy().into_owned();

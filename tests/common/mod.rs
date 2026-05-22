@@ -1,18 +1,20 @@
+#![allow(dead_code)]
+
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use fuser::{MountOption, SessionACL};
 use fscache::backing_watch::{BackingWatchHandle, WatchRequest};
-use fscache::cache::io::{CacheIO, CacheIoConfig};
-use fscache::engine::action::{AccessEvent, ActionEngine};
 use fscache::cache::db::CacheDb;
+use fscache::cache::io::{CacheIO, CacheIoConfig};
 use fscache::cache::manager::CacheManager;
 use fscache::config::{BackingWatchConfig, InvalidationConfig};
+use fscache::engine::action::{AccessEvent, ActionEngine};
+use fscache::engine::scheduler::Scheduler;
 use fscache::fuse::fusefs::FsCache;
 use fscache::preset::CachePreset;
 use fscache::presets::plex_episode_prediction::PlexEpisodePrediction;
-use fscache::engine::scheduler::Scheduler;
+use fuser::{MountOption, SessionACL};
 use tempfile::TempDir;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -135,7 +137,9 @@ impl FuseHarness {
 
     /// Panics if the harness was created without a cache (e.g. via `new()`).
     pub fn cache_mgr(&self) -> &Arc<CacheManager> {
-        self.cache_mgr.as_ref().expect("harness has no cache manager")
+        self.cache_mgr
+            .as_ref()
+            .expect("harness has no cache manager")
     }
 
     pub fn backing_path(&self) -> &Path {
@@ -147,7 +151,10 @@ impl FuseHarness {
     }
 
     pub fn cache_path(&self) -> &Path {
-        self.cache.as_ref().expect("harness has no cache dir").path()
+        self.cache
+            .as_ref()
+            .expect("harness has no cache dir")
+            .path()
     }
 
     /// Full pipeline harness: FUSE + cache overlay + predictor + copier all wired together.
@@ -316,7 +323,11 @@ impl OvermountHarness {
         let scheduler = Scheduler::new("00:00", "23:59").unwrap();
         let shutdown = CancellationToken::new();
         let (cache_io, _io_handles) = CacheIO::spawn(
-            CacheIoConfig { max_concurrent_copies: 1, eviction_interval_secs: 0, deferred_ttl_minutes: 0 },
+            CacheIoConfig {
+                max_concurrent_copies: 1,
+                eviction_interval_secs: 0,
+                deferred_ttl_minutes: 0,
+            },
             Arc::clone(&cache_mgr),
             Arc::clone(&backing_store),
             scheduler,
@@ -403,9 +414,18 @@ impl MultiFuseHarness {
             fs.cache = Some(Arc::clone(&cache_mgr));
 
             let session = fuser::spawn_mount2(fs, mount.path(), &test_fuse_config())?;
-            mounts.push(FuseHarness { backing, mount, cache: None, cache_mgr: Some(Arc::clone(&cache_mgr)), _session: session });
+            mounts.push(FuseHarness {
+                backing,
+                mount,
+                cache: None,
+                cache_mgr: Some(Arc::clone(&cache_mgr)),
+                _session: session,
+            });
         }
-        Ok(Self { mounts, shared_cache_base })
+        Ok(Self {
+            mounts,
+            shared_cache_base,
+        })
     }
 
     /// Create `n` independent full-pipeline mounts (FUSE + cache + predictor + copier).
@@ -445,7 +465,11 @@ impl MultiFuseHarness {
             let scheduler = Scheduler::new("00:00", "23:59").unwrap();
             let shutdown = CancellationToken::new();
             let (cache_io, _io_handles) = CacheIO::spawn(
-                CacheIoConfig { max_concurrent_copies: 1, eviction_interval_secs: 0, deferred_ttl_minutes: 0 },
+                CacheIoConfig {
+                    max_concurrent_copies: 1,
+                    eviction_interval_secs: 0,
+                    deferred_ttl_minutes: 0,
+                },
                 Arc::clone(&cache_mgr),
                 Arc::clone(&backing_store),
                 scheduler,
@@ -464,9 +488,18 @@ impl MultiFuseHarness {
             tokio::spawn(engine.run(shutdown));
 
             let session = fuser::spawn_mount2(fs, mount.path(), &test_fuse_config())?;
-            mounts.push(FuseHarness { backing, mount, cache: None, cache_mgr: Some(Arc::clone(&cache_mgr)), _session: session });
+            mounts.push(FuseHarness {
+                backing,
+                mount,
+                cache: None,
+                cache_mgr: Some(Arc::clone(&cache_mgr)),
+                _session: session,
+            });
         }
-        Ok(Self { mounts, shared_cache_base })
+        Ok(Self {
+            mounts,
+            shared_cache_base,
+        })
     }
 
     pub fn backing_path(&self, idx: usize) -> &std::path::Path {
@@ -550,7 +583,11 @@ impl BackingWatchHarness {
             Arc::clone(&backing_store),
             Arc::clone(&cache_mgr),
             cache_io_for_watcher,
-            BackingWatchConfig { enabled: true, max_dirs: 64, debounce_ms },
+            BackingWatchConfig {
+                enabled: true,
+                max_dirs: 64,
+                debounce_ms,
+            },
             shutdown.clone(),
             "test".to_string(),
         ));
@@ -568,7 +605,7 @@ impl BackingWatchHarness {
     }
 
     /// Create a harness with the backing watcher disabled (no task spawned, no handle set).
-    /// Use this to verify that backing mutations do not evict cache entries when the
+    /// Use this to verify that backing mutations do not trigger cache validation when the
     /// watcher is off.
     pub fn new_without_watcher(debounce_ms: u64) -> anyhow::Result<Self> {
         let backing = TempDir::new()?;
@@ -621,8 +658,12 @@ impl BackingWatchHarness {
         })
     }
 
-    pub fn backing_path(&self) -> &Path { self.backing.path() }
-    pub fn mount_path(&self) -> &Path { self.mount.path() }
+    pub fn backing_path(&self) -> &Path {
+        self.backing.path()
+    }
+    pub fn mount_path(&self) -> &Path {
+        self.mount.path()
+    }
 
     /// Sleep past the debounce window so the watcher task can dispatch.
     pub async fn wait_for_debounce(&self) {
@@ -630,7 +671,12 @@ impl BackingWatchHarness {
     }
 }
 
-pub fn write_multi_backing_file(harness: &MultiFuseHarness, mount_idx: usize, rel: &str, content: &[u8]) {
+pub fn write_multi_backing_file(
+    harness: &MultiFuseHarness,
+    mount_idx: usize,
+    rel: &str,
+    content: &[u8],
+) {
     let path = harness.backing_path(mount_idx).join(rel);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).unwrap();

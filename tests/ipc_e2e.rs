@@ -19,7 +19,7 @@ use std::time::Duration;
 use tokio::sync::broadcast;
 use tokio_util::sync::CancellationToken;
 
-use fscache::cache::db::CacheDb;
+use fscache::cache::db::{CacheDb, SourceMetadata};
 use fscache::config::{
     CacheConfig, Config, DiscoveryConfig, EvictionConfig, LoggingConfig, PathsConfig, PlexConfig,
     PrefetchConfig, PresetConfig, ScheduleConfig,
@@ -326,8 +326,8 @@ async fn full_pipeline_tracing_through_ipc_to_dashboard() {
     std::fs::write(&refresh_abs, b"data").unwrap();
     let mount_id = cache_dir.to_string_lossy().into_owned();
     let db = in_memory_db();
-    db.mark_cached(&evict_rel,  4, &mount_id, 0, 0);
-    db.mark_cached(&refresh_rel, 4, &mount_id, 0, 0);
+    db.mark_cached(&evict_rel, &mount_id, &SourceMetadata::test_file(4, 0, 0));
+    db.mark_cached(&refresh_rel, &mount_id, &SourceMetadata::test_file(4, 0, 0));
     // Back-date refresh_me so we can detect the lease renewal.
     let old_ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() as i64 - 3600;
@@ -570,7 +570,7 @@ async fn ipc_evict_files_removes_file_and_db_row() {
 
     let mount_id = cache_dir.to_string_lossy().into_owned();
     let db = in_memory_db();
-    db.mark_cached(&rel_path, 15, &mount_id, 0, 0);
+    db.mark_cached(&rel_path, &mount_id, &SourceMetadata::test_file(15, 0, 0));
     assert!(abs_path.exists(), "file should exist before evict");
     let (used, files) = db.client_files_for_mount(&mount_id);
     assert_eq!(files.len(), 1, "DB row should exist before evict");
@@ -612,7 +612,7 @@ async fn ipc_refresh_lease_updates_last_hit_at() {
 
     let mount_id = cache_dir.to_string_lossy().into_owned();
     let db = in_memory_db();
-    db.mark_cached(&rel_path, 100, &mount_id, 0, 0);
+    db.mark_cached(&rel_path, &mount_id, &SourceMetadata::test_file(100, 0, 0));
 
     // Back-date last_hit_at to 1 hour ago so we can confirm it changes.
     let old_ts = SystemTime::now()

@@ -4,6 +4,7 @@ use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use rusqlite::{Connection, params};
+use std::os::unix::fs::MetadataExt;
 
 /// Snapshot of a file's source-side identity at copy time.
 /// Used to detect whether a backing file has been rewritten since it was cached.
@@ -13,6 +14,88 @@ pub struct Fingerprint {
     pub source_mtime_secs: i64,
     pub source_mtime_nsecs: i64,
     pub size_bytes: u64,
+}
+
+/// Source-side metadata captured at copy/populate time for cached regular files.
+#[derive(Debug, Clone, Copy)]
+pub struct SourceMetadata {
+    pub size: u64,
+    pub blocks: u64,
+    pub atime_sec: i64,
+    pub atime_nsec: i64,
+    pub mtime_sec: i64,
+    pub mtime_nsec: i64,
+    pub ctime_sec: i64,
+    pub ctime_nsec: i64,
+    pub mode: u32,
+    pub nlink: u64,
+    pub uid: u32,
+    pub gid: u32,
+    pub rdev: u64,
+    pub blksize: u32,
+}
+
+impl SourceMetadata {
+    pub fn from_metadata(meta: &std::fs::Metadata) -> Self {
+        Self {
+            size: meta.len(),
+            blocks: meta.blocks(),
+            atime_sec: meta.atime(),
+            atime_nsec: meta.atime_nsec(),
+            mtime_sec: meta.mtime(),
+            mtime_nsec: meta.mtime_nsec(),
+            ctime_sec: meta.ctime(),
+            ctime_nsec: meta.ctime_nsec(),
+            mode: meta.mode(),
+            nlink: meta.nlink(),
+            uid: meta.uid(),
+            gid: meta.gid(),
+            rdev: meta.rdev(),
+            blksize: meta.blksize() as u32,
+        }
+    }
+
+    pub fn from_stat(st: &libc::stat) -> Self {
+        Self {
+            size: st.st_size.max(0) as u64,
+            blocks: st.st_blocks.max(0) as u64,
+            atime_sec: st.st_atime,
+            atime_nsec: st.st_atime_nsec,
+            mtime_sec: st.st_mtime,
+            mtime_nsec: st.st_mtime_nsec,
+            ctime_sec: st.st_ctime,
+            ctime_nsec: st.st_ctime_nsec,
+            mode: st.st_mode,
+            nlink: st.st_nlink,
+            uid: st.st_uid,
+            gid: st.st_gid,
+            rdev: st.st_rdev,
+            blksize: st.st_blksize as u32,
+        }
+    }
+
+    pub fn has_snapshot(&self) -> bool {
+        self.mode != 0 || self.size != 0 || self.mtime_sec != 0 || self.mtime_nsec != 0
+    }
+
+    pub fn test_file(size: u64, mtime_sec: i64, mtime_nsec: i64) -> Self {
+        Self {
+            size,
+            blocks: size.div_ceil(512),
+            atime_sec: mtime_sec,
+            atime_nsec: mtime_nsec,
+            mtime_sec,
+            mtime_nsec,
+            ctime_sec: mtime_sec,
+            ctime_nsec: mtime_nsec,
+            mode: libc::S_IFREG | 0o644,
+            nlink: 1,
+            uid: 0,
+            gid: 0,
+            rdev: 0,
+            blksize: 4096,
+        }
+    }
 }
 
 /// SQLite-backed cache metadata store.
@@ -32,7 +115,8 @@ impl CacheDb {
         let conn = Connection::open(path)?;
         // WAL gives concurrent readers without blocking the single writer.
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
-        conn.execute_batch(r#"
+        conn.execute_batch(
+            r#"
             CREATE TABLE IF NOT EXISTS cache_files (
                 rel_path    TEXT    NOT NULL,
                 mount_id    TEXT    NOT NULL,
@@ -64,7 +148,8 @@ impl CacheDb {
             ) WITHOUT ROWID;
             CREATE INDEX IF NOT EXISTS idx_process_access_recency
                 ON process_access (bucket_epoch);
-        "#)?;
+        "#,
+        )?;
         // Additive migrations — silently ignored if column already present.
         let _ = conn.execute_batch(
             "ALTER TABLE cache_files ADD COLUMN hit_count INTEGER NOT NULL DEFAULT 0",
@@ -75,29 +160,66 @@ impl CacheDb {
         let _ = conn.execute_batch(
             "ALTER TABLE cache_files ADD COLUMN source_mtime_nsecs INTEGER NOT NULL DEFAULT 0",
         );
-        Ok(Self { conn: Mutex::new(conn) })
+        let _ = conn.execute_batch(
+            "ALTER TABLE cache_files ADD COLUMN source_size_bytes INTEGER NOT NULL DEFAULT 0",
+        );
+        let _ = conn.execute_batch(
+            "ALTER TABLE cache_files ADD COLUMN source_blocks INTEGER NOT NULL DEFAULT 0",
+        );
+        let _ = conn.execute_batch(
+            "ALTER TABLE cache_files ADD COLUMN source_atime_sec INTEGER NOT NULL DEFAULT 0",
+        );
+        let _ = conn.execute_batch(
+            "ALTER TABLE cache_files ADD COLUMN source_atime_nsec INTEGER NOT NULL DEFAULT 0",
+        );
+        let _ = conn.execute_batch(
+            "ALTER TABLE cache_files ADD COLUMN source_ctime_sec INTEGER NOT NULL DEFAULT 0",
+        );
+        let _ = conn.execute_batch(
+            "ALTER TABLE cache_files ADD COLUMN source_ctime_nsec INTEGER NOT NULL DEFAULT 0",
+        );
+        let _ = conn.execute_batch(
+            "ALTER TABLE cache_files ADD COLUMN source_mode INTEGER NOT NULL DEFAULT 0",
+        );
+        let _ = conn.execute_batch(
+            "ALTER TABLE cache_files ADD COLUMN source_nlink INTEGER NOT NULL DEFAULT 0",
+        );
+        let _ = conn.execute_batch(
+            "ALTER TABLE cache_files ADD COLUMN source_uid INTEGER NOT NULL DEFAULT 0",
+        );
+        let _ = conn.execute_batch(
+            "ALTER TABLE cache_files ADD COLUMN source_gid INTEGER NOT NULL DEFAULT 0",
+        );
+        let _ = conn.execute_batch(
+            "ALTER TABLE cache_files ADD COLUMN source_rdev INTEGER NOT NULL DEFAULT 0",
+        );
+        let _ = conn.execute_batch(
+            "ALTER TABLE cache_files ADD COLUMN source_blksize INTEGER NOT NULL DEFAULT 0",
+        );
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
     }
 
-    pub fn mark_cached(
-        &self,
-        rel_path: &Path,
-        size_bytes: u64,
-        mount_id: &str,
-        source_mtime_secs: i64,
-        source_mtime_nsecs: i64,
-    ) {
+    pub fn mark_cached(&self, rel_path: &Path, mount_id: &str, source: &SourceMetadata) {
         let now = now_secs() as i64;
         let key = rel_path.to_string_lossy();
         let conn = self.conn.lock().unwrap();
         let _ = conn.execute(
             "INSERT OR REPLACE INTO cache_files \
              (rel_path, mount_id, size_bytes, cached_at, last_hit_at, hit_count, \
-              source_mtime_secs, source_mtime_nsecs) \
-             VALUES (?1, ?2, ?3, ?4, ?4, 1, ?5, ?6)",
-            params![key.as_ref(), mount_id, size_bytes as i64, now,
-                    source_mtime_secs, source_mtime_nsecs],
+              source_mtime_secs, source_mtime_nsecs, source_size_bytes, source_blocks, \
+              source_atime_sec, source_atime_nsec, source_ctime_sec, source_ctime_nsec, \
+              source_mode, source_nlink, source_uid, source_gid, source_rdev, source_blksize) \
+             VALUES (?1, ?2, ?3, ?4, ?4, 1, ?5, ?6, ?3, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            params![
+                key.as_ref(), mount_id, source.size as i64, now, source.mtime_sec, source.mtime_nsec,
+                source.blocks as i64, source.atime_sec, source.atime_nsec, source.ctime_sec, source.ctime_nsec,
+                source.mode as i64, source.nlink as i64, source.uid as i64, source.gid as i64,
+                source.rdev as i64, source.blksize as i64,
+            ],
         );
-        tracing::info!(event = crate::telemetry::EVENT_DB_INSERT, path = %rel_path.display(), size_bytes, "db: mark_cached {}", rel_path.display());
+        tracing::info!(event = crate::telemetry::EVENT_DB_INSERT, path = %rel_path.display(), size_bytes = source.size, "db: mark_cached {}", rel_path.display());
     }
 
     /// Update the last-hit timestamp for a file (called on cache hit in FUSE open).
@@ -200,15 +322,14 @@ impl CacheDb {
         let conn = self.conn.lock().unwrap();
 
         let db_paths: Vec<String> = {
-            let mut stmt = match conn.prepare(
-                "SELECT rel_path FROM cache_files WHERE mount_id = ?1",
-            ) {
-                Ok(s) => s,
-                Err(_) => {
-                    tracing::warn!("db: reconcile_with_disk prepare failed");
-                    return;
-                }
-            };
+            let mut stmt =
+                match conn.prepare("SELECT rel_path FROM cache_files WHERE mount_id = ?1") {
+                    Ok(s) => s,
+                    Err(_) => {
+                        tracing::warn!("db: reconcile_with_disk prepare failed");
+                        return;
+                    }
+                };
             stmt.query_map(params![mount_id], |row| row.get(0))
                 .into_iter()
                 .flatten()
@@ -258,7 +379,10 @@ impl CacheDb {
         let file_count = on_disk.len();
         tracing::info!(
             "Cache startup: {} files ({} partial removed, {} DB orphans purged, {} recovered)",
-            file_count, removed_partials, orphan_count, new_count,
+            file_count,
+            removed_partials,
+            orphan_count,
+            new_count,
         );
     }
 
@@ -281,9 +405,9 @@ impl CacheDb {
     pub fn load_deferred(&self, ttl_minutes: u64) -> Vec<(PathBuf, PathBuf, u64)> {
         let cutoff = now_secs().saturating_sub(ttl_minutes * 60) as i64;
         let conn = self.conn.lock().unwrap();
-        let mut stmt = match conn.prepare(
-            "SELECT key, path, timestamp FROM deferred_events WHERE timestamp >= ?1",
-        ) {
+        let mut stmt = match conn
+            .prepare("SELECT key, path, timestamp FROM deferred_events WHERE timestamp >= ?1")
+        {
             Ok(s) => s,
             Err(_) => return vec![],
         };
@@ -316,7 +440,9 @@ impl CacheDb {
         // pragmas on first open; query_only prevents any actual mutations.
         let conn = Connection::open(path)?;
         conn.execute_batch("PRAGMA query_only=1;")?;
-        Ok(Self { conn: Mutex::new(conn) })
+        Ok(Self {
+            conn: Mutex::new(conn),
+        })
     }
 
     /// Returns `(used_bytes, Vec<(rel_path, size_bytes, cached_at, last_hit_at)>)`
@@ -336,9 +462,9 @@ impl CacheDb {
         let rows: Vec<(PathBuf, u64, SystemTime, SystemTime)> = stmt
             .query_map(params![mount_id], |row| {
                 let path: String = row.get(0)?;
-                let size: i64    = row.get(1)?;
-                let ca: i64      = row.get(2)?;
-                let lha: i64     = row.get(3)?;
+                let size: i64 = row.get(1)?;
+                let ca: i64 = row.get(2)?;
+                let lha: i64 = row.get(3)?;
                 Ok((
                     PathBuf::from(path),
                     size.max(0) as u64,
@@ -358,9 +484,9 @@ impl CacheDb {
     /// Used by the TUI stats poll to display accurate insertion and last-access times.
     pub fn file_timestamps(&self, mount_id: &str) -> HashMap<PathBuf, (SystemTime, SystemTime)> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = match conn.prepare(
-            "SELECT rel_path, cached_at, last_hit_at FROM cache_files WHERE mount_id = ?1",
-        ) {
+        let mut stmt = match conn
+            .prepare("SELECT rel_path, cached_at, last_hit_at FROM cache_files WHERE mount_id = ?1")
+        {
             Ok(s) => s,
             Err(_) => return HashMap::new(),
         };
@@ -374,11 +500,45 @@ impl CacheDb {
         .flatten()
         .flatten()
         .map(|(p, ca, lha)| {
-            let t_cached  = UNIX_EPOCH + Duration::from_secs(ca.max(0) as u64);
-            let t_last    = UNIX_EPOCH + Duration::from_secs(lha.max(0) as u64);
+            let t_cached = UNIX_EPOCH + Duration::from_secs(ca.max(0) as u64);
+            let t_last = UNIX_EPOCH + Duration::from_secs(lha.max(0) as u64);
             (p, (t_cached, t_last))
         })
         .collect()
+    }
+
+    /// Fetch stored source metadata for a cached file. Returns None for missing or pre-snapshot rows.
+    pub fn source_metadata_row(&self, rel_path: &Path, mount_id: &str) -> Option<SourceMetadata> {
+        let key = rel_path.to_string_lossy();
+        let conn = self.conn.lock().unwrap();
+        let meta = conn
+            .query_row(
+                "SELECT source_size_bytes, source_blocks, source_atime_sec, source_atime_nsec, \
+                    source_mtime_secs, source_mtime_nsecs, source_ctime_sec, source_ctime_nsec, \
+                    source_mode, source_nlink, source_uid, source_gid, source_rdev, source_blksize \
+             FROM cache_files WHERE rel_path = ?1 AND mount_id = ?2",
+                params![key.as_ref(), mount_id],
+                |row| {
+                    Ok(SourceMetadata {
+                        size: row.get::<_, i64>(0)?.max(0) as u64,
+                        blocks: row.get::<_, i64>(1)?.max(0) as u64,
+                        atime_sec: row.get(2)?,
+                        atime_nsec: row.get(3)?,
+                        mtime_sec: row.get(4)?,
+                        mtime_nsec: row.get(5)?,
+                        ctime_sec: row.get(6)?,
+                        ctime_nsec: row.get(7)?,
+                        mode: row.get::<_, i64>(8)?.max(0) as u32,
+                        nlink: row.get::<_, i64>(9)?.max(0) as u64,
+                        uid: row.get::<_, i64>(10)?.max(0) as u32,
+                        gid: row.get::<_, i64>(11)?.max(0) as u32,
+                        rdev: row.get::<_, i64>(12)?.max(0) as u64,
+                        blksize: row.get::<_, i64>(13)?.max(0) as u32,
+                    })
+                },
+            )
+            .ok()?;
+        meta.has_snapshot().then_some(meta)
     }
 
     /// Fetch the stored fingerprint for a single file. Returns `None` if the file is not tracked.
@@ -399,7 +559,8 @@ impl CacheDb {
                     size_bytes: size.max(0) as u64,
                 })
             },
-        ).ok()
+        )
+        .ok()
     }
 
     /// Fetch fingerprints for all tracked files in a mount in a single bulk query.
@@ -415,52 +576,22 @@ impl CacheDb {
         };
         stmt.query_map(params![mount_id], |row| {
             let path: String = row.get(0)?;
-            let secs: i64    = row.get(1)?;
-            let nsecs: i64   = row.get(2)?;
-            let size: i64    = row.get(3)?;
-            Ok((PathBuf::from(path), Fingerprint {
-                source_mtime_secs: secs,
-                source_mtime_nsecs: nsecs,
-                size_bytes: size.max(0) as u64,
-            }))
+            let secs: i64 = row.get(1)?;
+            let nsecs: i64 = row.get(2)?;
+            let size: i64 = row.get(3)?;
+            Ok((
+                PathBuf::from(path),
+                Fingerprint {
+                    source_mtime_secs: secs,
+                    source_mtime_nsecs: nsecs,
+                    size_bytes: size.max(0) as u64,
+                },
+            ))
         })
         .into_iter()
         .flatten()
         .flatten()
         .collect()
-    }
-
-    /// Write or overwrite the fingerprint columns for a tracked file.
-    /// Used to lazy-backfill pre-migration rows and to update after re-copy.
-    pub fn set_fingerprint(
-        &self,
-        rel_path: &Path,
-        mount_id: &str,
-        secs: i64,
-        nsecs: i64,
-        size: u64,
-    ) {
-        let key = rel_path.to_string_lossy();
-        let conn = self.conn.lock().unwrap();
-        let _ = conn.execute(
-            "UPDATE cache_files \
-             SET source_mtime_secs = ?1, source_mtime_nsecs = ?2, size_bytes = ?3 \
-             WHERE rel_path = ?4 AND mount_id = ?5",
-            params![secs, nsecs, size as i64, key.as_ref(), mount_id],
-        );
-    }
-
-    /// Test helper: same as `set_fingerprint`, named for symmetry with
-    /// `set_last_hit_at_for_test`.
-    pub fn set_fingerprint_for_test(
-        &self,
-        rel_path: &Path,
-        mount_id: &str,
-        secs: i64,
-        nsecs: i64,
-        size: u64,
-    ) {
-        self.set_fingerprint(rel_path, mount_id, secs, nsecs, size);
     }
 
     /// Directly set `last_hit_at` for a cached file. Used in tests to simulate
@@ -548,25 +679,27 @@ impl CacheDb {
              ORDER BY SUM(count) DESC
              LIMIT ?2",
         )?;
-        let rows = stmt.query_map(params![since_epoch, limit as i64], |row| {
-            Ok(ProcessSummary {
-                process_name:     row.get(0)?,
-                hit:              row.get::<_, i64>(1)?.max(0) as u64,
-                miss:             row.get::<_, i64>(2)?.max(0) as u64,
-                meta:             row.get::<_, i64>(3)?.max(0) as u64,
-                total:            row.get::<_, i64>(4)?.max(0) as u64,
-                first_seen:       row.get(5)?,
-                sample_cmdline:   row.get(6)?,
-                sample_ancestors: row.get(7)?,
-            })
-        })?
-        .flatten()
-        .collect::<Vec<_>>();
+        let rows = stmt
+            .query_map(params![since_epoch, limit as i64], |row| {
+                Ok(ProcessSummary {
+                    process_name: row.get(0)?,
+                    hit: row.get::<_, i64>(1)?.max(0) as u64,
+                    miss: row.get::<_, i64>(2)?.max(0) as u64,
+                    meta: row.get::<_, i64>(3)?.max(0) as u64,
+                    total: row.get::<_, i64>(4)?.max(0) as u64,
+                    first_seen: row.get(5)?,
+                    sample_cmdline: row.get(6)?,
+                    sample_ancestors: row.get(7)?,
+                })
+            })?
+            .flatten()
+            .collect::<Vec<_>>();
 
         if let Some(kind) = kind_filter {
-            let filtered: Vec<_> = rows.into_iter()
+            let filtered: Vec<_> = rows
+                .into_iter()
                 .filter(|r| match kind {
-                    "hit"  => r.hit  > 0,
+                    "hit" => r.hit > 0,
                     "miss" => r.miss > 0,
                     "meta" => r.meta > 0,
                     _ => true,
@@ -602,14 +735,13 @@ fn remove_partials(dir: &Path) -> usize {
             let path = entry.path();
             if path.is_dir() {
                 count += remove_partials(&path);
-            } else if path.extension().map_or(false, |e| e == "partial") {
-                if std::fs::remove_file(&path).is_ok() {
-                    tracing::debug!("startup_cleanup: removed {}", path.display());
-                    count += 1;
-                }
+            } else if path.extension().is_some_and(|e| e == "partial")
+                && std::fs::remove_file(&path).is_ok()
+            {
+                tracing::debug!("startup_cleanup: removed {}", path.display());
+                count += 1;
             }
         }
     }
     count
 }
-

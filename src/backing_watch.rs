@@ -81,6 +81,7 @@ struct WdEntry {
 /// it enumerates. Such directories remain unwatched until any FUSE operation causes a
 /// fresh `lookup`. In practice this only affects directories the kernel has cached
 /// across a fscache restart; they become watched on the next access that misses the dcache.
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     mut rx: mpsc::UnboundedReceiver<WatchRequest>,
     notifier: fuser::Notifier,
@@ -121,7 +122,15 @@ pub async fn run(
 
     // Seed the root backing directory immediately so files at the root level are covered
     // without requiring a FUSE lookup to happen first. Root is FUSE ino=1.
-    touch_or_add(&mut stream, &mut lru, &mut wd_map, &backing_store, PathBuf::new(), 1, config.max_dirs);
+    touch_or_add(
+        &mut stream,
+        &mut lru,
+        &mut wd_map,
+        &backing_store,
+        PathBuf::new(),
+        1,
+        config.max_dirs,
+    );
 
     tracing::info!(
         "backing_watch[{mount_id}]: started (max_dirs={}, debounce_ms={})",
@@ -131,7 +140,7 @@ pub async fn run(
 
     loop {
         tokio::select! {
-            biased; // check shutdown first to avoid processing events after teardown
+            biased;
 
             _ = shutdown.cancelled() => break,
 
@@ -205,11 +214,11 @@ fn touch_or_add(
         return; // already watched; LRU order updated by get()
     }
 
-    if lru.len() >= max_dirs.max(1) {
-        if let Some((_, evicted_wd)) = lru.pop_lru() {
-            wd_map.remove(&evicted_wd);
-            let _ = stream.watches().remove(evicted_wd);
-        }
+    if lru.len() >= max_dirs.max(1)
+        && let Some((_, evicted_wd)) = lru.pop_lru()
+    {
+        wd_map.remove(&evicted_wd);
+        let _ = stream.watches().remove(evicted_wd);
     }
 
     // Build a /proc/self/fd/<n> path that bypasses the FUSE overmount.
@@ -247,7 +256,9 @@ fn touch_or_add(
         | WatchMask::MOVED_FROM
         | WatchMask::MOVED_TO;
 
-    let result = stream.watches().add(std::path::Path::new(&watch_path), mask);
+    let result = stream
+        .watches()
+        .add(std::path::Path::new(&watch_path), mask);
 
     if borrowed_fd >= 0 {
         unsafe { libc::close(borrowed_fd) };
@@ -275,9 +286,14 @@ fn handle_event(
     // inval_entry requires a child name, so skip these — inval_entry on the parent of this
     // watched dir would require knowledge of its own parent ino which we don't have.
     let Some(name) = event.name else { return };
-    let Some(entry) = wd_map.get(&event.wd) else { return };
+    let Some(entry) = wd_map.get(&event.wd) else {
+        return;
+    };
 
-    let severity = if event.mask.intersects(EventMask::DELETE | EventMask::MOVED_FROM) {
+    let severity = if event
+        .mask
+        .intersects(EventMask::DELETE | EventMask::MOVED_FROM)
+    {
         Severity::Delete
     } else if event.mask.intersects(EventMask::MODIFY) {
         Severity::Modify
@@ -308,6 +324,7 @@ fn handle_event(
 }
 
 /// Fan out a coalesced event to kernel fsnotify, cache invalidation, and telemetry.
+#[allow(clippy::too_many_arguments)]
 async fn dispatch(
     notifier: &fuser::Notifier,
     cache: &Arc<CacheManager>,
@@ -334,20 +351,19 @@ async fn dispatch(
     // ENOENT is swallowed by fuser (entry already evicted). ENODEV after unmount is benign.
     let _ = notifier.inval_entry(fuser::INodeNo(parent_ino), name.as_ref());
 
-    let cache_evicted = if cache.is_cached(&child_rel) {
+    let queued_validation = if cache.is_cached(&child_rel) {
         cache_io.mark_abort(&child_rel).await;
-        let cache_clone = Arc::clone(cache);
-        let rel = child_rel.clone();
-        let _ = tokio::task::spawn_blocking(move || {
-            cache_clone.drop_stale(&rel, telemetry::EVICTION_REASON_BACKING_EVENT);
-        })
-        .await;
+        cache_io.submit_validation(child_rel.clone()).await;
         true
     } else {
         false
     };
 
-    let action_str = if cache_evicted { "both" } else { "kernel_notified" };
+    let action_str = if queued_validation {
+        "kernel_notified_validation_queued"
+    } else {
+        "kernel_notified"
+    };
 
     tracing::info!(
         event = telemetry::EVENT_BACKING_CHANGED,

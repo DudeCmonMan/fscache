@@ -106,14 +106,11 @@ async fn run_daemon(config_path: Option<PathBuf>) -> anyhow::Result<()> {
 
     let instance_name = config.paths.instance_name.clone();
 
-    let ipc_log_level: Level = config
-        .logging
-        .console_level
-        .parse()
-        .unwrap_or(Level::INFO);
+    let ipc_log_level: Level = config.logging.console_level.parse().unwrap_or(Level::INFO);
 
-    let recent_logs: std::sync::Arc<std::sync::Mutex<std::collections::VecDeque<ipc::protocol::LogLine>>>
-        = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
+    let recent_logs: std::sync::Arc<
+        std::sync::Mutex<std::collections::VecDeque<ipc::protocol::LogLine>>,
+    > = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
 
     let console_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(&config.logging.console_level))
@@ -122,7 +119,8 @@ async fn run_daemon(config_path: Option<PathBuf>) -> anyhow::Result<()> {
         .add_directive("fscache::discovery=off".parse().unwrap());
 
     std::fs::create_dir_all(&config.logging.log_directory).ok();
-    let file_appender = tracing_appender::rolling::daily(&config.logging.log_directory, "fscache.log");
+    let file_appender =
+        tracing_appender::rolling::daily(&config.logging.log_directory, "fscache.log");
     let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
 
     let discovery_appender = tracing_appender::rolling::Builder::new()
@@ -132,7 +130,8 @@ async fn run_daemon(config_path: Option<PathBuf>) -> anyhow::Result<()> {
         .max_log_files(config.discovery.window_days as usize)
         .build(&config.logging.log_directory)
         .expect("failed to create discovery log appender");
-    let (discovery_nonblocking, _discovery_guard) = tracing_appender::non_blocking(discovery_appender);
+    let (discovery_nonblocking, _discovery_guard) =
+        tracing_appender::non_blocking(discovery_appender);
 
     // Four subscribers sharing the same tracing events:
     //   1. fmt → console
@@ -165,7 +164,7 @@ async fn run_daemon(config_path: Option<PathBuf>) -> anyhow::Result<()> {
                 .event_format(discovery::DiscoveryFormatter)
                 .with_filter(
                     tracing_subscriber::filter::Targets::new()
-                        .with_target("fscache::discovery", tracing::Level::DEBUG)
+                        .with_target("fscache::discovery", tracing::Level::DEBUG),
                 ),
         )
         .init();
@@ -183,7 +182,10 @@ async fn run_daemon(config_path: Option<PathBuf>) -> anyhow::Result<()> {
 
     let _instance_lock = utils::acquire_instance_lock(&config.paths.instance_name)?;
 
-    let targets: Vec<PathBuf> = config.paths.target_directories.iter()
+    let targets: Vec<PathBuf> = config
+        .paths
+        .target_directories
+        .iter()
         .map(|s| PathBuf::from(s))
         .collect();
     utils::validate_targets(&targets)?;
@@ -201,8 +203,7 @@ async fn run_daemon(config_path: Option<PathBuf>) -> anyhow::Result<()> {
             "failed to open cache DB {}: {e} — falling back to in-memory DB",
             db_path.display()
         );
-        cache::db::CacheDb::open(std::path::Path::new(":memory:"))
-            .expect("in-memory DB must open")
+        cache::db::CacheDb::open(std::path::Path::new(":memory:")).expect("in-memory DB must open")
     }));
 
     let eviction = config::EvictionConfig::resolve(&config.eviction, &config.cache);
@@ -212,8 +213,7 @@ async fn run_daemon(config_path: Option<PathBuf>) -> anyhow::Result<()> {
     config.eviction.expiry_hours = eviction.expiry_hours;
     config.eviction.min_free_space_gb = eviction.min_free_space_gb;
 
-    let max_cache_pull_bytes =
-        (config.cache.max_cache_pull_per_mount_gb * 1_073_741_824.0) as u64;
+    let max_cache_pull_bytes = (config.cache.max_cache_pull_per_mount_gb * 1_073_741_824.0) as u64;
 
     // Shared with all background tasks so any of them (or a signal) can
     // trigger a clean shutdown.
@@ -246,29 +246,30 @@ async fn run_daemon(config_path: Option<PathBuf>) -> anyhow::Result<()> {
 
     let socket_path = ipc::server::socket_path(&instance_name);
 
-    let mount_info_wire: Vec<ipc::protocol::MountInfoWire> = targets.iter()
+    let mount_info_wire: Vec<ipc::protocol::MountInfoWire> = targets
+        .iter()
         .map(|target| {
             let cache_dir = base_cache_dir.join(utils::mount_cache_name(target));
             ipc::protocol::MountInfoWire {
-                target:    target.clone(),
+                target: target.clone(),
                 cache_dir: cache_dir.clone(),
-                active:    true,
+                active: true,
             }
         })
         .collect();
 
     let hello = ipc::protocol::DaemonMessage::Hello(ipc::protocol::HelloPayload {
-        version:       BUILD_VERSION.to_string(),
+        version: BUILD_VERSION.to_string(),
         instance_name: instance_name.clone(),
-        mounts:        mount_info_wire,
-        db_path:       db_path.to_string_lossy().into_owned(),
-        config:        config.clone(),
+        mounts: mount_info_wire,
+        db_path: db_path.to_string_lossy().into_owned(),
+        config: config.clone(),
     });
 
     // Bind early (before FUSE mounts) to minimise discovery gap for `fscache watch`.
-    let ipc_token    = shutdown_token.clone();
-    let ipc_db       = Arc::clone(&db);
-    let ipc_disc     = Arc::clone(&discovery_ctrl);
+    let ipc_token = shutdown_token.clone();
+    let ipc_db = Arc::clone(&db);
+    let ipc_disc = Arc::clone(&discovery_ctrl);
     background.spawn(async move {
         let _ = ipc::server::run_ipc_server(
             socket_path,
@@ -278,11 +279,12 @@ async fn run_daemon(config_path: Option<PathBuf>) -> anyhow::Result<()> {
             recent_logs,
             ipc_db,
             ipc_disc,
-        ).await;
+        )
+        .await;
     });
 
     {
-        let prune_db  = Arc::clone(&db);
+        let prune_db = Arc::clone(&db);
         let prune_tok = shutdown_token.clone();
         let window_days = config.discovery.window_days;
         background.spawn(async move {
@@ -320,10 +322,10 @@ async fn run_daemon(config_path: Option<PathBuf>) -> anyhow::Result<()> {
 
     struct MountHandle {
         _session: fuser::BackgroundSession,
-        target:   PathBuf,
+        target: PathBuf,
     }
-    let mut mounts:         Vec<MountHandle> = Vec::new();
-    let mut _target_locks:  Vec<std::fs::File> = Vec::new();
+    let mut mounts: Vec<MountHandle> = Vec::new();
+    let mut _target_locks: Vec<std::fs::File> = Vec::new();
 
     for target in &targets {
         if let Some(holder) = utils::find_fscache_mount_holder(target) {
@@ -342,7 +344,7 @@ async fn run_daemon(config_path: Option<PathBuf>) -> anyhow::Result<()> {
         let target_lock = utils::acquire_target_lock(target)?;
         _target_locks.push(target_lock);
 
-        let mount_name     = utils::mount_cache_name(target);
+        let mount_name = utils::mount_cache_name(target);
         let mount_cache_dir = base_cache_dir.join(&mount_name);
         std::fs::create_dir_all(&mount_cache_dir)?;
 
@@ -358,22 +360,24 @@ async fn run_daemon(config_path: Option<PathBuf>) -> anyhow::Result<()> {
         };
 
         let mut fs = fuse::fusefs::FsCache::new(target)?;
-        fs.passthrough_mode  = config.cache.passthrough_mode;
+        fs.passthrough_mode = config.cache.passthrough_mode;
         if let Some(tx) = watch_tx {
             fs.backing_watch = Some(backing_watch::BackingWatchHandle::new(tx));
         }
-        fs.repeat_log_window = std::time::Duration::from_secs(
-            config.logging.repeat_log_window_secs,
-        );
+        fs.repeat_log_window =
+            std::time::Duration::from_secs(config.logging.repeat_log_window_secs);
 
-        let plex_allowlist  = config.plex.process_allowlist.clone();
-        let plex_blocklist  = config.plex.process_blocklist.clone();
-        let rolling_buffer  = config.plex.mode == "rolling-buffer";
+        let plex_allowlist = config.plex.process_allowlist.clone();
+        let plex_blocklist = config.plex.process_blocklist.clone();
+        let rolling_buffer = config.plex.mode == "rolling-buffer";
 
         let preset: Arc<dyn preset::CachePreset> = match config.preset.name.as_str() {
             "plex-episode-prediction" | "episode-prediction" => Arc::new(
                 presets::plex_episode_prediction::PlexEpisodePrediction::new_with_process_policy(
-                    config.plex.lookahead, plex_allowlist, plex_blocklist, rolling_buffer,
+                    config.plex.lookahead,
+                    plex_allowlist,
+                    plex_blocklist,
+                    rolling_buffer,
                 ),
             ),
             "prefetch" => {
@@ -388,13 +392,16 @@ async fn run_daemon(config_path: Option<PathBuf>) -> anyhow::Result<()> {
                         &config.prefetch.file_whitelist,
                         &config.prefetch.file_blacklist,
                     )
-                    .map_err(|e| anyhow::anyhow!("[{}] prefetch preset config error: {}", mount_name, e))?,
+                    .map_err(|e| {
+                        anyhow::anyhow!("[{}] prefetch preset config error: {}", mount_name, e)
+                    })?,
                 )
             }
             other => {
                 tracing::warn!(
                     "[{}] Unknown preset {:?}, falling back to \"plex-episode-prediction\"",
-                    mount_name, other
+                    mount_name,
+                    other
                 );
                 Arc::new(
                     presets::plex_episode_prediction::PlexEpisodePrediction::new_with_process_policy(
@@ -406,8 +413,8 @@ async fn run_daemon(config_path: Option<PathBuf>) -> anyhow::Result<()> {
                 )
             }
         };
-        fs.preset     = Some(Arc::clone(&preset));
-        fs.discovery  = Some(Arc::clone(&discovery_ctrl));
+        fs.preset = Some(Arc::clone(&preset));
+        fs.discovery = Some(Arc::clone(&discovery_ctrl));
 
         let cache_manager = Arc::new(cache::manager::CacheManager::new(
             mount_cache_dir.clone(),
@@ -422,8 +429,7 @@ async fn run_daemon(config_path: Option<PathBuf>) -> anyhow::Result<()> {
         cache_manager.startup_cleanup();
         fs.cache = Some(Arc::clone(&cache_manager));
 
-        let (access_tx, access_rx) =
-            tokio::sync::mpsc::unbounded_channel();
+        let (access_tx, access_rx) = tokio::sync::mpsc::unbounded_channel();
         fs.access_tx = Some(access_tx);
 
         let backing_store = Arc::clone(&fs.backing_store);
@@ -447,12 +453,14 @@ async fn run_daemon(config_path: Option<PathBuf>) -> anyhow::Result<()> {
         // Clone before move into ActionEngine so the backing watcher can use it too.
         let cache_io_for_watcher = watch_rx.as_ref().map(|_| cache_io.clone());
         for h in io_handles {
-            background.spawn(async move { let _ = h.await; });
+            background.spawn(async move {
+                let _ = h.await;
+            });
         }
 
         let engine = engine::action::ActionEngine::new(
             access_rx,
-            cache_io,
+            cache_io.clone(),
             Arc::clone(&cache_manager),
             Some(preset),
             Arc::clone(&backing_store),
@@ -463,7 +471,7 @@ async fn run_daemon(config_path: Option<PathBuf>) -> anyhow::Result<()> {
         background.spawn(engine.run(shutdown_token.clone()));
         if config.eviction.poll_interval_secs > 0 && config.invalidation.check_on_maintenance {
             background.spawn(engine::action::run_maintenance_task(
-                Arc::clone(&cache_manager),
+                cache_io.clone(),
                 config.eviction.poll_interval_secs,
                 shutdown_token.clone(),
             ));
@@ -493,14 +501,18 @@ async fn run_daemon(config_path: Option<PathBuf>) -> anyhow::Result<()> {
             ));
         }
 
-        mounts.push(MountHandle { _session: session, target: target.clone() });
+        mounts.push(MountHandle {
+            _session: session,
+            target: target.clone(),
+        });
     }
 
-    tracing::info!("{} mount(s) active. Waiting for shutdown signal...", mounts.len());
+    tracing::info!(
+        "{} mount(s) active. Waiting for shutdown signal...",
+        mounts.len()
+    );
 
-    let mut sigterm = tokio::signal::unix::signal(
-        tokio::signal::unix::SignalKind::terminate(),
-    )?;
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
 
     tokio::select! {
         _ = tokio::signal::ctrl_c() => tracing::info!("Received SIGINT"),
@@ -511,7 +523,9 @@ async fn run_daemon(config_path: Option<PathBuf>) -> anyhow::Result<()> {
     shutdown_token.cancel();
 
     for mount in &mounts {
-        let mount_name = mount.target.file_name()
+        let mount_name = mount
+            .target
+            .file_name()
             .and_then(|n| n.to_str())
             .unwrap_or("mount");
         tracing::info!(
@@ -529,7 +543,8 @@ async fn run_daemon(config_path: Option<PathBuf>) -> anyhow::Result<()> {
             Err(e) => {
                 tracing::warn!(
                     "[{}] fusermount not available ({}), trying umount -l",
-                    mount_name, e
+                    mount_name,
+                    e
                 );
                 let _ = std::process::Command::new("umount")
                     .arg("-l")
@@ -549,7 +564,10 @@ async fn run_daemon(config_path: Option<PathBuf>) -> anyhow::Result<()> {
             }
         }
     };
-    if tokio::time::timeout(std::time::Duration::from_secs(15), drain).await.is_err() {
+    if tokio::time::timeout(std::time::Duration::from_secs(15), drain)
+        .await
+        .is_err()
+    {
         tracing::warn!(
             "background tasks did not drain within 15s; {} still pending",
             background.len()
@@ -568,10 +586,7 @@ async fn run_daemon(config_path: Option<PathBuf>) -> anyhow::Result<()> {
 // Watch client (fscache watch)
 // ---------------------------------------------------------------------------
 
-async fn run_watch(
-    instance: Option<String>,
-    socket: Option<PathBuf>,
-) -> anyhow::Result<()> {
+async fn run_watch(instance: Option<String>, socket: Option<PathBuf>) -> anyhow::Result<()> {
     let socket_path = resolve_socket(instance, socket).await?;
     tui::app::run_client(socket_path).await
 }
@@ -599,13 +614,18 @@ async fn resolve_socket(
         }
         1 => {
             let (name, hello) = &found[0];
-            eprintln!("Connecting to instance '{name}' ({} mount(s))", hello.mounts.len());
+            eprintln!(
+                "Connecting to instance '{name}' ({} mount(s))",
+                hello.mounts.len()
+            );
             Ok(ipc::server::socket_path(name))
         }
         _ => {
             eprintln!("Found {} running fscache instances:\n", found.len());
             for (i, (name, hello)) in found.iter().enumerate() {
-                let targets: Vec<String> = hello.mounts.iter()
+                let targets: Vec<String> = hello
+                    .mounts
+                    .iter()
                     .map(|m| m.target.to_string_lossy().into_owned())
                     .collect();
                 eprintln!(
@@ -621,7 +641,9 @@ async fn resolve_socket(
 
             let mut line = String::new();
             io::stdin().lock().read_line(&mut line)?;
-            let choice: usize = line.trim().parse()
+            let choice: usize = line
+                .trim()
+                .parse()
                 .map_err(|_| anyhow::anyhow!("invalid selection"))?;
 
             if choice < 1 || choice > found.len() {
@@ -638,15 +660,12 @@ async fn resolve_socket(
 // Discover client (fscache discover ...)
 // ---------------------------------------------------------------------------
 
-async fn run_discover(
-    instance: Option<String>,
-    action: DiscoverAction,
-) -> anyhow::Result<()> {
+async fn run_discover(instance: Option<String>, action: DiscoverAction) -> anyhow::Result<()> {
     use ipc::protocol::ClientMessage;
     match action {
         DiscoverAction::Stat { window, kind, top } => run_stat(instance, window, kind, top).await,
         DiscoverAction::Start => run_toggle(instance, ClientMessage::DiscoveryStart).await,
-        DiscoverAction::Stop  => run_toggle(instance, ClientMessage::DiscoveryStop).await,
+        DiscoverAction::Stop => run_toggle(instance, ClientMessage::DiscoveryStop).await,
     }
 }
 
@@ -659,7 +678,10 @@ fn format_recording(enabled: bool, started_at: Option<i64>) -> String {
     };
     let secs = (discovery::now_unix_sec() as i64 - at).max(0) as u64;
     let dur = std::time::Duration::from_secs(secs);
-    format!("Recording: on (started {} ago)", humantime::format_duration(dur))
+    format!(
+        "Recording: on (started {} ago)",
+        humantime::format_duration(dur)
+    )
 }
 
 /// Best-effort live status from the daemon. Never fails — returns an
@@ -708,14 +730,19 @@ async fn run_stat(
     println!("{recording_line}");
     println!("Window: last {win_str}");
     println!();
-    println!("{:<32}  {:>8}  {:>8}  {:>8}  {:>8}", "PROCESS", "HIT", "MISS", "META", "TOTAL");
+    println!(
+        "{:<32}  {:>8}  {:>8}  {:>8}  {:>8}",
+        "PROCESS", "HIT", "MISS", "META", "TOTAL"
+    );
     println!("{}", "-".repeat(72));
     if rows.is_empty() {
         println!("(no data in the last {win_str})");
     }
     for row in &rows {
-        println!("{:<32}  {:>8}  {:>8}  {:>8}  {:>8}",
-            row.process_name, row.hit, row.miss, row.meta, row.total);
+        println!(
+            "{:<32}  {:>8}  {:>8}  {:>8}  {:>8}",
+            row.process_name, row.hit, row.miss, row.meta, row.total
+        );
     }
     Ok(())
 }
@@ -738,11 +765,17 @@ async fn recv_discovery_status(
     reader: &mut ipc::IpcFramedReader,
 ) -> anyhow::Result<(bool, Option<i64>)> {
     use ipc::protocol::{DaemonMessage, TelemetryEvent};
-    use tokio::time::{timeout, Duration};
+    use tokio::time::{Duration, timeout};
     loop {
-        match timeout(Duration::from_secs(3), ipc::recv_msg::<DaemonMessage>(reader)).await {
+        match timeout(
+            Duration::from_secs(3),
+            ipc::recv_msg::<DaemonMessage>(reader),
+        )
+        .await
+        {
             Ok(Ok(Some(DaemonMessage::Event(TelemetryEvent::DiscoveryStatus {
-                enabled, started_at,
+                enabled,
+                started_at,
             })))) => return Ok((enabled, started_at)),
             Ok(Ok(Some(DaemonMessage::Goodbye))) | Ok(Ok(None)) => {
                 anyhow::bail!("daemon disconnected before sending DiscoveryStatus");

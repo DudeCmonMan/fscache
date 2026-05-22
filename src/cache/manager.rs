@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use super::db::{CacheDb, Fingerprint};
+use super::db::{CacheDb, Fingerprint, SourceMetadata};
 use crate::backing_store::BackingStore;
 
 /// Result of a staleness check against the backing store.
@@ -23,14 +23,14 @@ pub enum StaleResult {
 /// Snapshot of cache state returned by [`CacheManager::stats`].
 /// Polled by the TUI every few seconds — never called from the FUSE hot path.
 pub struct CacheStats {
-    pub max_size_bytes:   u64,
-    pub min_free_bytes:   u64,
-    pub expiry:           Duration,
+    pub max_size_bytes: u64,
+    pub min_free_bytes: u64,
+    pub expiry: Duration,
     pub free_space_bytes: Option<u64>,
-    pub used_bytes:       u64,
-    pub file_count:       usize,
+    pub used_bytes: u64,
+    pub file_count: usize,
     /// (relative_path, size_bytes, cached_at, last_hit_at) — timestamps from DB
-    pub files:            Vec<(PathBuf, u64, SystemTime, SystemTime)>,
+    pub files: Vec<(PathBuf, u64, SystemTime, SystemTime)>,
 }
 
 /// Filesystem-backed cache manager with SQLite metadata tracking.
@@ -59,6 +59,7 @@ impl CacheManager {
     /// `db` is the shared instance-level database (opened once in main, shared across mounts).
     /// `capacity_check_dir` is used for drive capacity checks — typically the cache root.
     /// `backing` is used for staleness checks; pass `None` in tests that don't need invalidation.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         cache_dir: PathBuf,
         db: Arc<CacheDb>,
@@ -121,7 +122,7 @@ impl CacheManager {
     /// Fast path: filesystem existence check. Not backed by SQLite to keep FUSE open() fast.
     pub fn is_cached(&self, rel_path: &Path) -> bool {
         let p = self.cache_path(rel_path);
-        p.exists() && !p.extension().map_or(false, |e| e == "partial")
+        p.exists() && p.extension().is_none_or(|e| e != "partial")
     }
 
     pub fn mount_id(&self) -> &str {
@@ -133,10 +134,14 @@ impl CacheManager {
     }
 
     /// Record a successful cache population. Called by the copier task after rename.
-    /// `mtime_secs` / `mtime_nsecs` are the source file's mtime at copy time (from
-    /// utimensat-preserved metadata on the cache file) — used for future staleness checks.
-    pub fn mark_cached(&self, rel_path: &Path, size_bytes: u64, mtime_secs: i64, mtime_nsecs: i64) {
-        self.db.mark_cached(rel_path, size_bytes, &self.mount_id, mtime_secs, mtime_nsecs);
+    /// Stores the source-side metadata snapshot used for future staleness checks
+    /// and cache-authoritative FUSE metadata.
+    pub fn mark_cached(&self, rel_path: &Path, source: SourceMetadata) {
+        self.db.mark_cached(rel_path, &self.mount_id, &source);
+    }
+
+    pub fn source_metadata(&self, rel_path: &Path) -> Option<SourceMetadata> {
+        self.db.source_metadata_row(rel_path, &self.mount_id)
     }
 
     /// Check whether the cached copy of `rel` is still consistent with the backing file.
@@ -157,11 +162,14 @@ impl CacheManager {
         if fp.source_mtime_secs == 0 && fp.source_mtime_nsecs == 0 {
             return StaleResult::NeedsBackfill(live);
         }
-        let stale =
-            fp.source_mtime_secs  != live.st_mtime     as i64 ||
-            fp.source_mtime_nsecs != live.st_mtime_nsec as i64 ||
-            fp.size_bytes         != live.st_size       as u64;
-        if stale { StaleResult::Stale } else { StaleResult::Fresh }
+        let stale = fp.source_mtime_secs != live.st_mtime
+            || fp.source_mtime_nsecs != live.st_mtime_nsec
+            || fp.size_bytes != live.st_size as u64;
+        if stale {
+            StaleResult::Stale
+        } else {
+            StaleResult::Fresh
+        }
     }
 
     /// Like `is_stale` but uses a pre-fetched fingerprint instead of doing a DB lookup.
@@ -178,11 +186,14 @@ impl CacheManager {
         if fp.source_mtime_secs == 0 && fp.source_mtime_nsecs == 0 {
             return StaleResult::NeedsBackfill(live);
         }
-        let stale =
-            fp.source_mtime_secs  != live.st_mtime     as i64 ||
-            fp.source_mtime_nsecs != live.st_mtime_nsec as i64 ||
-            fp.size_bytes         != live.st_size       as u64;
-        if stale { StaleResult::Stale } else { StaleResult::Fresh }
+        let stale = fp.source_mtime_secs != live.st_mtime
+            || fp.source_mtime_nsecs != live.st_mtime_nsec
+            || fp.size_bytes != live.st_size as u64;
+        if stale {
+            StaleResult::Stale
+        } else {
+            StaleResult::Fresh
+        }
     }
 
     /// Remove a stale cache entry — deletes the file from disk and removes the DB row.
@@ -212,15 +223,13 @@ impl CacheManager {
     /// Backfill the fingerprint for a pre-migration row (source_mtime = 0).
     /// Called when `is_stale` or `is_stale_with_fingerprint` returns `NeedsBackfill`.
     pub fn backfill_fingerprint(&self, rel: &Path, st: &libc::stat) {
-        self.db.set_fingerprint(
-            rel, &self.mount_id,
-            st.st_mtime as i64, st.st_mtime_nsec as i64, st.st_size as u64,
-        );
+        self.mark_cached(rel, SourceMetadata::from_stat(st));
     }
 
     /// Run a full stale sweep across all tracked files for this mount.
     /// Drops stale entries, backfills zero-fingerprint rows. Returns (checked, dropped).
-    /// Called from the periodic maintenance task (in a `spawn_blocking` context).
+    /// Kept for direct tests and one-shot cleanup callers; production maintenance queues
+    /// validation through CacheIO so validation can share the async pipeline.
     pub fn sweep_stale(&self) -> (u32, u32) {
         let rows = self.db.all_fingerprints(&self.mount_id);
         let (mut checked, mut dropped) = (0u32, 0u32);
@@ -260,7 +269,10 @@ impl CacheManager {
             for (rel_path, size) in self.db.expired_files(&self.mount_id, self.expiry.as_secs()) {
                 let abs_path = self.cache_dir.join(&rel_path);
                 if let Err(e) = std::fs::remove_file(&abs_path) {
-                    tracing::warn!("evict (expiry): failed to delete {}: {e}", abs_path.display());
+                    tracing::warn!(
+                        "evict (expiry): failed to delete {}: {e}",
+                        abs_path.display()
+                    );
                 } else {
                     tracing::info!(event = crate::telemetry::EVENT_EVICTION, path = %abs_path.display(), reason = "expired", "evict (expired): {}", abs_path.display());
                     self.db.remove(&rel_path, &self.mount_id);
@@ -372,31 +384,33 @@ impl CacheManager {
         }
 
         CacheStats {
-            max_size_bytes:   self.max_size_bytes,
-            min_free_bytes:   self.min_free_bytes,
-            expiry:           self.expiry,
+            max_size_bytes: self.max_size_bytes,
+            min_free_bytes: self.min_free_bytes,
+            expiry: self.expiry,
             free_space_bytes: free_space_bytes(&self.cache_dir),
             used_bytes,
-            file_count:       files.len(),
+            file_count: files.len(),
             files,
         }
     }
 }
-
-// ---- helpers ----
 
 fn statvfs_query(path: &Path) -> Option<libc::statvfs> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
     let c = CString::new(path.as_os_str().as_bytes()).ok()?;
     let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
-    if unsafe { libc::statvfs(c.as_ptr(), &mut stat) } == 0 { Some(stat) } else { None }
+    if unsafe { libc::statvfs(c.as_ptr(), &mut stat) } == 0 {
+        Some(stat)
+    } else {
+        None
+    }
 }
 
 fn free_space_bytes(path: &Path) -> Option<u64> {
-    statvfs_query(path).map(|s| s.f_bavail * s.f_bsize as u64)
+    statvfs_query(path).map(|s| s.f_bavail * s.f_bsize)
 }
 
 fn total_space_bytes(path: &Path) -> Option<u64> {
-    statvfs_query(path).map(|s| s.f_blocks * s.f_frsize as u64)
+    statvfs_query(path).map(|s| s.f_blocks * s.f_frsize)
 }

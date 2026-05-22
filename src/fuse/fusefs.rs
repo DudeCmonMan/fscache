@@ -12,13 +12,14 @@ use crate::preset::{CachePreset, ProcessInfo};
 use crate::telemetry;
 
 use fuser::{
-    Errno, FileAttr, FileType, FileHandle, FopenFlags, Generation, INodeNo, KernelConfig,
-    OpenFlags, LockOwner, Filesystem, ReplyAttr, ReplyData, ReplyDirectory, ReplyEmpty,
+    Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags, Generation, INodeNo,
+    KernelConfig, LockOwner, OpenFlags, ReplyAttr, ReplyData, ReplyDirectory, ReplyEmpty,
     ReplyEntry, ReplyOpen, Request,
 };
 
-use crate::cache::manager::{CacheManager, StaleResult};
 use super::inode::InodeTable;
+use crate::cache::db::SourceMetadata;
+use crate::cache::manager::CacheManager;
 use crate::engine::action::AccessEvent;
 
 /// Short TTL so the kernel re-checks after a cache file appears.
@@ -69,9 +70,7 @@ impl FsCache {
         let c_path = CString::new(backing_path.as_os_str().as_bytes())
             .map_err(|_| anyhow::anyhow!("invalid backing path"))?;
 
-        let fd = unsafe {
-            libc::open(c_path.as_ptr(), libc::O_PATH | libc::O_DIRECTORY)
-        };
+        let fd = unsafe { libc::open(c_path.as_ptr(), libc::O_PATH | libc::O_DIRECTORY) };
         if fd < 0 {
             return Err(anyhow::anyhow!(
                 "failed to open backing path {}: {}",
@@ -80,7 +79,10 @@ impl FsCache {
             ));
         }
 
-        tracing::debug!("Opened backing store O_PATH fd for {}", backing_path.display());
+        tracing::debug!(
+            "Opened backing store O_PATH fd for {}",
+            backing_path.display()
+        );
         Ok(Self {
             backing_store: Arc::new(BackingStore::new(fd)),
             inodes: Arc::new(Mutex::new(InodeTable::new())),
@@ -141,6 +143,39 @@ impl FsCache {
         }
     }
 
+    fn source_metadata_to_attr(&self, ino: u64, m: &SourceMetadata) -> FileAttr {
+        FileAttr {
+            ino: INodeNo(ino),
+            size: m.size,
+            blocks: m.blocks,
+            atime: UNIX_EPOCH
+                + Duration::new(m.atime_sec.max(0) as u64, m.atime_nsec.max(0) as u32),
+            mtime: UNIX_EPOCH
+                + Duration::new(m.mtime_sec.max(0) as u64, m.mtime_nsec.max(0) as u32),
+            ctime: UNIX_EPOCH
+                + Duration::new(m.ctime_sec.max(0) as u64, m.ctime_nsec.max(0) as u32),
+            crtime: UNIX_EPOCH,
+            kind: FileType::RegularFile,
+            perm: (m.mode & 0o7777) as u16,
+            nlink: m.nlink as u32,
+            uid: m.uid,
+            gid: m.gid,
+            rdev: m.rdev as u32,
+            blksize: m.blksize,
+            flags: 0,
+        }
+    }
+
+    fn cached_regular_attr(&self, rel_path: &Path, ino: u64) -> Option<FileAttr> {
+        let cache = self.cache.as_ref()?;
+        if !cache.is_cached(rel_path) {
+            return None;
+        }
+        cache
+            .source_metadata(rel_path)
+            .map(|m| self.source_metadata_to_attr(ino, &m))
+    }
+
     fn list_dir_entries(
         &self,
         dir_fd: RawFd,
@@ -151,13 +186,19 @@ impl FsCache {
 
         let mut entries: Vec<(OsString, u64, FileType)> = Vec::new();
 
-        let dot_ino = self.inodes.lock().unwrap()
+        let dot_ino = self
+            .inodes
+            .lock()
+            .unwrap()
             .get_path_ino(parent_path)
             .unwrap_or(InodeTable::root_ino().0);
         entries.push((OsString::from("."), dot_ino, FileType::Directory));
 
         let dotdot_path = parent_path.parent().unwrap_or(Path::new(""));
-        let dotdot_ino = self.inodes.lock().unwrap()
+        let dotdot_ino = self
+            .inodes
+            .lock()
+            .unwrap()
             .get_path_ino(dotdot_path)
             .unwrap_or(InodeTable::root_ino().0);
         entries.push((OsString::from(".."), dotdot_ino, FileType::Directory));
@@ -194,15 +235,19 @@ impl FsCache {
             };
 
             let kind = match unsafe { (*dirent).d_type } {
-                libc::DT_DIR  => FileType::Directory,
-                libc::DT_LNK  => FileType::Symlink,
-                libc::DT_BLK  => FileType::BlockDevice,
-                libc::DT_CHR  => FileType::CharDevice,
+                libc::DT_DIR => FileType::Directory,
+                libc::DT_LNK => FileType::Symlink,
+                libc::DT_BLK => FileType::BlockDevice,
+                libc::DT_CHR => FileType::CharDevice,
                 libc::DT_FIFO => FileType::NamedPipe,
                 libc::DT_SOCK => FileType::Socket,
-                libc::DT_UNKNOWN | _ => match self.stat_backing(&child_path) {
+                libc::DT_UNKNOWN => match self.stat_backing(&child_path) {
                     Some(s) => mode_to_filetype(s.st_mode),
-                    None    => FileType::RegularFile,
+                    None => FileType::RegularFile,
+                },
+                _ => match self.stat_backing(&child_path) {
+                    Some(s) => mode_to_filetype(s.st_mode),
+                    None => FileType::RegularFile,
                 },
             };
 
@@ -219,49 +264,37 @@ impl FsCache {
     /// `filtered` is passed through only to determine the return outcome (Hit vs
     /// Miss vs Filtered) — it does not affect which store is attempted.
     fn try_open(&self, path: &Path, filtered: bool) -> Result<(i32, OpenOutcome), Errno> {
-        if !self.passthrough_mode {
-            if let Some(ref cache) = self.cache {
-                if cache.is_cached(path) {
-                    let mut open_from_cache = true;
-
-                    if cache.check_on_hit() {
-                        match cache.is_stale(path) {
-                            StaleResult::Stale | StaleResult::BackingGone => {
-                                tracing::info!(
-                                    event = telemetry::EVENT_EVICTION,
-                                    path = %path.display(),
-                                    reason = telemetry::EVICTION_REASON_STALE_ON_HIT,
-                                    "stale cache drop on hit: {:?}", path,
-                                );
-                                cache.drop_stale(path, telemetry::EVICTION_REASON_STALE_ON_HIT);
-                                open_from_cache = false;
-                            }
-                            StaleResult::NeedsBackfill(st) => {
-                                cache.backfill_fingerprint(path, &st);
-                            }
-                            StaleResult::Fresh | StaleResult::NotTracked => {}
-                        }
-                    }
-
-                    if open_from_cache {
-                        let cache_path = cache.cache_path(path);
-                        let c = path_to_cstring_abs(&cache_path);
-                        let fd = unsafe { libc::open(c.as_ptr(), libc::O_RDONLY) };
-                        if fd >= 0 {
-                            // Update LRU timestamp in DB (non-blocking; best-effort).
-                            cache.mark_hit(path);
-                            return Ok((fd, OpenOutcome::Hit));
-                        }
-                        // Cache file vanished between check and open — fall through.
-                        tracing::warn!("cache hit race for {:?}, falling back to backing store", path);
-                    }
-                }
+        if !self.passthrough_mode
+            && let Some(ref cache) = self.cache
+            && cache.is_cached(path)
+        {
+            let cache_path = cache.cache_path(path);
+            let c = path_to_cstring_abs(&cache_path);
+            let fd = unsafe { libc::open(c.as_ptr(), libc::O_RDONLY) };
+            if fd >= 0 {
+                cache.mark_hit(path);
+                return Ok((fd, OpenOutcome::Hit));
             }
+            tracing::debug!(
+                path = %path.display(),
+                cache_path = %cache_path.display(),
+                error = %std::io::Error::last_os_error(),
+                "cache hit race, falling back to backing store"
+            );
         }
 
-        let fd = self.backing_store.open_file(path)
+        let fd = self
+            .backing_store
+            .open_file(path)
             .map_err(|_| Errno::from_i32(last_errno()))?;
-        Ok((fd, if filtered { OpenOutcome::Filtered } else { OpenOutcome::Miss }))
+        Ok((
+            fd,
+            if filtered {
+                OpenOutcome::Filtered
+            } else {
+                OpenOutcome::Miss
+            },
+        ))
     }
 
     /// Emit the appropriate tracing line for an open() outcome.
@@ -289,7 +322,9 @@ impl FsCache {
             OpenOutcome::Filtered => {
                 tracing::info!(
                     "ignored process access: {:?} (filtered by preset, not caching) [opener: {} pid={}]",
-                    path, opener, pid,
+                    path,
+                    opener,
+                    pid,
                 );
             }
             OpenOutcome::Miss if suppress => {
@@ -325,7 +360,10 @@ impl Filesystem for FsCache {
     fn lookup(&self, req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
         let parent_path = match self.inodes.lock().unwrap().get_path(parent.0) {
             Some(p) => p.to_path_buf(),
-            None => { reply.error(Errno::ENOENT); return; }
+            None => {
+                reply.error(Errno::ENOENT);
+                return;
+            }
         };
 
         let child_path = if parent_path == Path::new("") {
@@ -334,21 +372,28 @@ impl Filesystem for FsCache {
             parent_path.join(name)
         };
 
+        let ino = self.inodes.lock().unwrap().get_or_create(&child_path);
+
+        if let Some(attr) = self.cached_regular_attr(&child_path, ino) {
+            if let Some(ref d) = self.discovery {
+                d.log_touch(req.pid(), OpKind::Meta);
+            }
+            reply.entry(&TTL, &attr, Generation(0));
+            return;
+        }
+
         let Some(stat) = self.stat_backing(&child_path) else {
             reply.error(Errno::ENOENT);
             return;
         };
 
-        if let Some(ref d) = self.discovery { d.log_touch(req.pid(), OpKind::Meta); }
-
-        let ino = self.inodes.lock().unwrap().get_or_create(&child_path);
-
-        // Seed the backing watcher for directories so upstream inotify consumers
-        // on the FUSE mount receive events when the backing directory changes.
-        if stat.st_mode & libc::S_IFMT == libc::S_IFDIR {
-            if let Some(ref bw) = self.backing_watch {
-                bw.touch(child_path.clone(), ino);
-            }
+        if let Some(ref d) = self.discovery {
+            d.log_touch(req.pid(), OpKind::Meta);
+        }
+        if stat.st_mode & libc::S_IFMT == libc::S_IFDIR
+            && let Some(ref bw) = self.backing_watch
+        {
+            bw.touch(child_path.clone(), ino);
         }
 
         let attr = self.stat_to_attr(ino, &stat);
@@ -362,13 +407,27 @@ impl Filesystem for FsCache {
     fn getattr(&self, req: &Request, ino: INodeNo, _fh: Option<FileHandle>, reply: ReplyAttr) {
         let path = match self.inodes.lock().unwrap().get_path(ino.0) {
             Some(p) => p.to_path_buf(),
-            None => { reply.error(Errno::ENOENT); return; }
+            None => {
+                reply.error(Errno::ENOENT);
+                return;
+            }
         };
+
+        if let Some(attr) = self.cached_regular_attr(&path, ino.0) {
+            if let Some(ref d) = self.discovery {
+                d.log_touch(req.pid(), OpKind::Meta);
+            }
+            reply.attr(&TTL, &attr);
+            return;
+        }
+
         let Some(stat) = self.stat_backing(&path) else {
             reply.error(Errno::ENOENT);
             return;
         };
-        if let Some(ref d) = self.discovery { d.log_touch(req.pid(), OpKind::Meta); }
+        if let Some(ref d) = self.discovery {
+            d.log_touch(req.pid(), OpKind::Meta);
+        }
         reply.attr(&TTL, &self.stat_to_attr(ino.0, &stat));
     }
 
@@ -380,7 +439,10 @@ impl Filesystem for FsCache {
 
         let path = match self.inodes.lock().unwrap().get_path(ino.0) {
             Some(p) => p.to_path_buf(),
-            None => { reply.error(Errno::ENOENT); return; }
+            None => {
+                reply.error(Errno::ENOENT);
+                return;
+            }
         };
 
         let suppress = self.should_suppress_log(&path);
@@ -396,22 +458,30 @@ impl Filesystem for FsCache {
             let name = proc.name.clone();
             let is_filtered = preset.should_filter(proc);
             if proc.name.as_deref() == Some("Plex Transcoder") {
-                let cmdline = proc.cmdline.as_deref()
-                    .map(|b| b.split(|&c| c == 0)
-                        .filter(|s| !s.is_empty())
-                        .map(|s| String::from_utf8_lossy(s).into_owned())
-                        .collect::<Vec<_>>()
-                        .join(" "))
+                let cmdline = proc
+                    .cmdline
+                    .as_deref()
+                    .map(|b| {
+                        b.split(|&c| c == 0)
+                            .filter(|s| !s.is_empty())
+                            .map(|s| String::from_utf8_lossy(s).into_owned())
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    })
                     .unwrap_or_default();
                 tracing::debug!(
                     "Plex Transcoder open: filtered={} pid={} cmdline={:?}",
-                    is_filtered, req.pid(), cmdline,
+                    is_filtered,
+                    req.pid(),
+                    cmdline,
                 );
             }
             if is_filtered {
                 tracing::debug!(
                     "preset filtered pid {} ({}) on {:?}",
-                    req.pid(), name.as_deref().unwrap_or("?"), path
+                    req.pid(),
+                    name.as_deref().unwrap_or("?"),
+                    path
                 );
                 (true, name)
             } else {
@@ -425,7 +495,10 @@ impl Filesystem for FsCache {
 
         let (fd, outcome) = match self.try_open(&path, filtered) {
             Ok(v) => v,
-            Err(e) => { reply.error(e); return; }
+            Err(e) => {
+                reply.error(e);
+                return;
+            }
         };
 
         self.log_open_outcome(&path, opener_name.as_deref(), req.pid(), outcome, suppress);
@@ -436,14 +509,19 @@ impl Filesystem for FsCache {
         if !filtered {
             let engine_event = match outcome {
                 OpenOutcome::Hit => Some(AccessEvent::hit(path.clone())),
-                OpenOutcome::Miss if !self.passthrough_mode => Some(AccessEvent::miss(path.clone())),
+                OpenOutcome::Miss if !self.passthrough_mode => {
+                    Some(AccessEvent::miss(path.clone()))
+                }
                 OpenOutcome::Miss | OpenOutcome::Filtered => None,
             };
             if let Some(event) = engine_event {
                 if let Some(ref tx) = self.access_tx {
                     let _ = tx.send(event);
                 }
-                self.open_paths.lock().unwrap().insert(fd as u64, path.clone());
+                self.open_paths
+                    .lock()
+                    .unwrap()
+                    .insert(fd as u64, path.clone());
             }
         }
 
@@ -502,7 +580,11 @@ impl Filesystem for FsCache {
     ) {
         let bytes_read = self.open_bytes.lock().unwrap().remove(&fh.0).unwrap_or(0);
         let path = self.open_paths.lock().unwrap().remove(&fh.0);
-        tracing::debug!(event = telemetry::EVENT_HANDLE_CLOSED, bytes_read, "handle closed");
+        tracing::debug!(
+            event = telemetry::EVENT_HANDLE_CLOSED,
+            bytes_read,
+            "handle closed"
+        );
         if let (Some(path), Some(tx)) = (path, &self.access_tx) {
             let _ = tx.send(AccessEvent::close(path, bytes_read));
         }
@@ -513,9 +595,14 @@ impl Filesystem for FsCache {
     fn opendir(&self, req: &Request, ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
         let path = match self.inodes.lock().unwrap().get_path(ino.0) {
             Some(p) => p.to_path_buf(),
-            None => { reply.error(Errno::ENOENT); return; }
+            None => {
+                reply.error(Errno::ENOENT);
+                return;
+            }
         };
-        if let Some(ref d) = self.discovery { d.log_touch(req.pid(), OpKind::Meta); }
+        if let Some(ref d) = self.discovery {
+            d.log_touch(req.pid(), OpKind::Meta);
+        }
 
         // O_PATH fds can't be used with fdopendir, so always open via openat with real flags.
         // For root, open "." relative to the backing fd.
@@ -525,7 +612,11 @@ impl Filesystem for FsCache {
             path_to_cstring(&path)
         };
         let fd = unsafe {
-            libc::openat(self.backing_store.fd(), c_path.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY)
+            libc::openat(
+                self.backing_store.fd(),
+                c_path.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY,
+            )
         };
 
         if fd < 0 {
@@ -546,7 +637,10 @@ impl Filesystem for FsCache {
     ) {
         let parent_path = match self.inodes.lock().unwrap().get_path(ino.0) {
             Some(p) => p.to_path_buf(),
-            None => { reply.error(Errno::ENOENT); return; }
+            None => {
+                reply.error(Errno::ENOENT);
+                return;
+            }
         };
 
         let entries = self.list_dir_entries(fh.0 as RawFd, &parent_path);
@@ -579,7 +673,10 @@ impl Filesystem for FsCache {
     fn readlink(&self, _req: &Request, ino: INodeNo, reply: ReplyData) {
         let path = match self.inodes.lock().unwrap().get_path(ino.0) {
             Some(p) => p.to_path_buf(),
-            None => { reply.error(Errno::ENOENT); return; }
+            None => {
+                reply.error(Errno::ENOENT);
+                return;
+            }
         };
 
         let c_path = path_to_cstring(&path);
@@ -605,7 +702,11 @@ impl Filesystem for FsCache {
         // Open a real fd to "." relative to the backing dir for the call.
         let dot = CString::new(".").unwrap();
         let real_fd = unsafe {
-            libc::openat(self.backing_store.fd(), dot.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY)
+            libc::openat(
+                self.backing_store.fd(),
+                dot.as_ptr(),
+                libc::O_RDONLY | libc::O_DIRECTORY,
+            )
         };
         if real_fd < 0 {
             reply.error(Errno::from_i32(last_errno()));
@@ -639,8 +740,7 @@ fn path_to_cstring(path: &Path) -> CString {
 
 /// CString from an absolute path (preserves leading `/`).
 fn path_to_cstring_abs(path: &Path) -> CString {
-    CString::new(path.as_os_str().as_bytes())
-        .unwrap_or_else(|_| CString::new("/dev/null").unwrap())
+    CString::new(path.as_os_str().as_bytes()).unwrap_or_else(|_| CString::new("/dev/null").unwrap())
 }
 
 fn last_errno() -> libc::c_int {
@@ -651,12 +751,12 @@ fn last_errno() -> libc::c_int {
 
 fn mode_to_filetype(mode: libc::mode_t) -> FileType {
     match mode & libc::S_IFMT {
-        libc::S_IFDIR  => FileType::Directory,
-        libc::S_IFLNK  => FileType::Symlink,
-        libc::S_IFBLK  => FileType::BlockDevice,
-        libc::S_IFCHR  => FileType::CharDevice,
-        libc::S_IFIFO  => FileType::NamedPipe,
+        libc::S_IFDIR => FileType::Directory,
+        libc::S_IFLNK => FileType::Symlink,
+        libc::S_IFBLK => FileType::BlockDevice,
+        libc::S_IFCHR => FileType::CharDevice,
+        libc::S_IFIFO => FileType::NamedPipe,
         libc::S_IFSOCK => FileType::Socket,
-        _              => FileType::RegularFile,
+        _ => FileType::RegularFile,
     }
 }

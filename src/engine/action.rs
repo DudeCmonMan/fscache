@@ -26,13 +26,22 @@ pub struct AccessEvent {
 
 impl AccessEvent {
     pub fn miss(relative_path: PathBuf) -> Self {
-        Self { relative_path, kind: EventKind::Miss }
+        Self {
+            relative_path,
+            kind: EventKind::Miss,
+        }
     }
     pub fn hit(relative_path: PathBuf) -> Self {
-        Self { relative_path, kind: EventKind::Hit }
+        Self {
+            relative_path,
+            kind: EventKind::Hit,
+        }
     }
     pub fn close(relative_path: PathBuf, bytes_read: u64) -> Self {
-        Self { relative_path, kind: EventKind::Close { bytes_read } }
+        Self {
+            relative_path,
+            kind: EventKind::Close { bytes_read },
+        }
     }
 }
 
@@ -70,16 +79,27 @@ impl ActionEngine {
         min_file_size_mb: u64,
     ) -> Self {
         Self {
-            rx, cache_io, cache, preset, backing_store,
-            max_cache_pull_bytes, min_access_secs, min_file_size_mb,
+            rx,
+            cache_io,
+            cache,
+            preset,
+            backing_store,
+            max_cache_pull_bytes,
+            min_access_secs,
+            min_file_size_mb,
         }
     }
 
     pub async fn run(self, shutdown: CancellationToken) {
         let ActionEngine {
-            mut rx, cache_io, cache, preset,
-            backing_store, max_cache_pull_bytes,
-            min_access_secs, min_file_size_mb,
+            mut rx,
+            cache_io,
+            cache,
+            preset,
+            backing_store,
+            max_cache_pull_bytes,
+            min_access_secs,
+            min_file_size_mb,
         } = self;
 
         // Access filter: pending buffer for min_access_secs gate.
@@ -191,6 +211,12 @@ impl ActionEngine {
             }
 
             for event in to_process {
+                if matches!(event.kind, EventKind::Hit) && cache.check_on_hit() {
+                    cache_io
+                        .submit_validation(event.relative_path.clone())
+                        .await;
+                }
+
                 let next: Vec<PathBuf> = if let Some(ref preset) = preset {
                     let cache_db = cache.cache_db();
                     let ctx = RuleContext {
@@ -199,8 +225,10 @@ impl ActionEngine {
                     };
                     let actions = match event.kind {
                         EventKind::Miss => preset.on_miss(&event.relative_path, &ctx),
-                        EventKind::Hit  => preset.on_hit(&event.relative_path, &ctx),
-                        EventKind::Close { bytes_read } => preset.on_close(&event.relative_path, bytes_read, &ctx),
+                        EventKind::Hit => preset.on_hit(&event.relative_path, &ctx),
+                        EventKind::Close { bytes_read } => {
+                            preset.on_close(&event.relative_path, bytes_read, &ctx)
+                        }
                     };
                     actions
                         .into_iter()
@@ -215,16 +243,26 @@ impl ActionEngine {
                 };
 
                 if next.is_empty() {
-                    tracing::debug!("action_engine: no upcoming episodes found for {:?}", event.relative_path);
+                    tracing::debug!(
+                        "action_engine: no upcoming episodes found for {:?}",
+                        event.relative_path
+                    );
                 }
 
                 let budget_active = max_cache_pull_bytes > 0;
-                let mut running_total = if budget_active { cache.total_cached_bytes() } else { 0 };
+                let mut running_total = if budget_active {
+                    cache.total_cached_bytes()
+                } else {
+                    0
+                };
                 let mut first_candidate = true;
 
                 for rel in next {
                     if cache.is_cached(&rel) {
-                        tracing::debug!("action_engine: {} already cached, skipping", rel.display());
+                        tracing::debug!(
+                            "action_engine: {} already cached, skipping",
+                            rel.display()
+                        );
                         continue;
                     }
                     if budget_active {
@@ -258,7 +296,7 @@ impl ActionEngine {
 /// Spawned once per mount when `poll_interval_secs > 0` and
 /// `invalidation.check_on_maintenance` is true.
 pub async fn run_maintenance_task(
-    cache: Arc<CacheManager>,
+    cache_io: CacheIO,
     poll_interval_secs: u64,
     shutdown: CancellationToken,
 ) {
@@ -269,15 +307,7 @@ pub async fn run_maintenance_task(
     loop {
         tokio::select! {
             _ = tokio::time::sleep(interval) => {
-                let cache_clone = Arc::clone(&cache);
-                tokio::task::spawn_blocking(move || {
-                    let (checked, dropped) = cache_clone.sweep_stale();
-                    tracing::info!(
-                        "maintenance stale sweep: checked={checked} dropped={dropped}"
-                    );
-                })
-                .await
-                .ok();
+                cache_io.submit_maintenance_validation().await;
             }
             _ = shutdown.cancelled() => break,
         }

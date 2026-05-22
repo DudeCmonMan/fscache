@@ -14,7 +14,8 @@ use tokio::sync::{Mutex, Notify, Semaphore};
 use tokio_util::sync::CancellationToken;
 
 use crate::backing_store::BackingStore;
-use crate::cache::manager::CacheManager;
+use crate::cache::db::SourceMetadata;
+use crate::cache::manager::{CacheManager, StaleResult};
 use crate::engine::scheduler::Scheduler;
 use crate::telemetry;
 
@@ -34,6 +35,20 @@ pub struct CopyControl {
     pub abort: AtomicBool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CacheJobKind {
+    Populate,
+    Validate,
+    Replace,
+}
+
+#[derive(Debug, Clone)]
+struct CacheJob {
+    rel_path: PathBuf,
+    kind: CacheJobKind,
+    enqueue_ts: u64,
+}
+
 /// Single source of truth for all pending and in-flight cache work.
 ///
 /// The `queue` is a FIFO of paths waiting for the caching window to open.
@@ -42,11 +57,11 @@ pub struct CopyControl {
 /// its copy worker finishes (success or failure), so dedup is airtight across
 /// the queue-to-in-flight transition.
 struct PipelineState {
-    /// FIFO of `(rel_path, enqueue_timestamp_secs)`.
-    queue: VecDeque<(PathBuf, u64)>,
-    /// All paths currently queued OR in flight. Drives submit-time dedup.
+    /// FIFO of cache jobs.
+    queue: VecDeque<CacheJob>,
+    /// All jobs currently queued OR in flight. Dedupe includes job kind so validation does not suppress replacement.
     /// Value is the abort-control handle for in-flight entries (None while still queued).
-    known: HashMap<PathBuf, Option<Arc<CopyControl>>>,
+    known: HashMap<(PathBuf, CacheJobKind), Option<Arc<CopyControl>>>,
 }
 
 impl PipelineState {
@@ -68,13 +83,13 @@ impl PipelineState {
 /// drain the queue. There is exactly one code path into the copy pipeline.
 #[derive(Clone)]
 pub struct CacheIO {
-    cache:                Arc<CacheManager>,
-    backing_store:        Arc<BackingStore>,
-    scheduler:            Scheduler,
-    state:                Arc<Mutex<PipelineState>>,
-    notify:               Arc<Notify>,
-    semaphore:            Arc<Semaphore>,
-    evict_lock:           Arc<Mutex<()>>,
+    cache: Arc<CacheManager>,
+    backing_store: Arc<BackingStore>,
+    scheduler: Scheduler,
+    state: Arc<Mutex<PipelineState>>,
+    notify: Arc<Notify>,
+    semaphore: Arc<Semaphore>,
+    evict_lock: Arc<Mutex<()>>,
     deferred_ttl_minutes: u64,
 }
 
@@ -99,9 +114,14 @@ impl CacheIO {
             tracing::info!("cache_io: loaded {} deferred job(s) from DB", loaded.len());
         }
         for (_, path, ts) in loaded {
-            if !initial.known.contains_key(&path) {
-                initial.known.insert(path.clone(), None);
-                initial.queue.push_back((path, ts));
+            let key = (path.clone(), CacheJobKind::Populate);
+            if let std::collections::hash_map::Entry::Vacant(entry) = initial.known.entry(key) {
+                entry.insert(None);
+                initial.queue.push_back(CacheJob {
+                    rel_path: path,
+                    kind: CacheJobKind::Populate,
+                    enqueue_ts: ts,
+                });
             }
         }
         let initial_count = initial.queue.len() as u64;
@@ -147,34 +167,62 @@ impl CacheIO {
     }
 
     /// Submit a path for caching. This is the single entrypoint for all cache requests.
-    ///
-    /// The path is pushed onto the queue unconditionally (subject to dedup and
-    /// already-cached checks). The caching window check happens in the dispatcher —
-    /// not here. There is no separate "deferred vs. immediate" branch.
     pub async fn submit_cache(&self, rel_path: PathBuf) {
+        self.submit_job(rel_path, CacheJobKind::Populate).await;
+    }
+
+    pub async fn submit_validation(&self, rel_path: PathBuf) {
+        self.submit_job(rel_path, CacheJobKind::Validate).await;
+    }
+
+    pub async fn submit_replace(&self, rel_path: PathBuf) {
+        self.submit_job(rel_path, CacheJobKind::Replace).await;
+    }
+
+    pub async fn submit_maintenance_validation(&self) {
+        for (rel, _) in self
+            .cache
+            .cache_db()
+            .all_fingerprints(self.cache.mount_id())
+        {
+            self.submit_validation(rel).await;
+        }
+    }
+
+    async fn submit_job(&self, rel_path: PathBuf, kind: CacheJobKind) {
         // Cheap check before taking the lock — avoids contention on cache hits.
-        if self.cache.is_cached(&rel_path) {
+        if kind == CacheJobKind::Populate && self.cache.is_cached(&rel_path) {
             tracing::debug!("cache_io: {} already cached, skipping", rel_path.display());
             return;
         }
 
         let queue_len = {
             let mut st = self.state.lock().await;
-            if st.known.contains_key(&rel_path) {
+            let key = (rel_path.clone(), kind);
+            if st.known.contains_key(&key) {
                 tracing::debug!(
-                    "cache_io: {} already queued or in flight, skipping",
+                    "cache_io: {:?} {} already queued or in flight, skipping",
+                    kind,
                     rel_path.display()
                 );
                 return;
             }
-            st.known.insert(rel_path.clone(), None);
+            st.known.insert(key, None);
             let now = now_secs();
-            st.queue.push_back((rel_path.clone(), now));
+            st.queue.push_back(CacheJob {
+                rel_path: rel_path.clone(),
+                kind,
+                enqueue_ts: now,
+            });
             let len = st.queue.len() as u64;
 
-            // Persist while holding the lock so the DB row and the in-memory
-            // entry are always in sync.
-            self.cache.cache_db().save_deferred(&rel_path, &rel_path, now);
+            // Only populate jobs are persisted across restart; validation/replacement
+            // are cheap coherence work and should not rehydrate as populate jobs.
+            if kind == CacheJobKind::Populate {
+                self.cache
+                    .cache_db()
+                    .save_deferred(&rel_path, &rel_path, now);
+            }
             len
         };
 
@@ -195,10 +243,13 @@ impl CacheIO {
         self.notify.notify_one();
     }
 
-    /// Signal the in-flight copy for `rel` to abort before committing. No-op if not in flight.
+    /// Signal in-flight copy jobs for `rel` to abort before committing. No-op if not in flight.
     pub async fn mark_abort(&self, rel: &Path) {
-        if let Some(Some(ctrl)) = self.state.lock().await.known.get(rel) {
-            ctrl.abort.store(true, Ordering::Release);
+        let state = self.state.lock().await;
+        for kind in [CacheJobKind::Populate, CacheJobKind::Replace] {
+            if let Some(Some(ctrl)) = state.known.get(&(rel.to_path_buf(), kind)) {
+                ctrl.abort.store(true, Ordering::Release);
+            }
         }
     }
 
@@ -214,13 +265,15 @@ impl CacheIO {
         let removed: Vec<PathBuf> = {
             let mut st = self.state.lock().await;
             let mut expired = Vec::new();
-            while let Some((_, ts)) = st.queue.front() {
-                if *ts >= cutoff {
+            while let Some(job) = st.queue.front() {
+                if job.enqueue_ts >= cutoff {
                     break;
                 }
-                let (path, _) = st.queue.pop_front().unwrap();
-                st.known.remove(&path);
-                expired.push(path);
+                let job = st.queue.pop_front().unwrap();
+                st.known.remove(&(job.rel_path.clone(), job.kind));
+                if job.kind == CacheJobKind::Populate {
+                    expired.push(job.rel_path);
+                }
             }
             expired
         };
@@ -242,9 +295,8 @@ impl CacheIO {
     }
 }
 
-/// The dispatcher is the only place the caching window is consulted.
-/// It wakes on every `submit_cache` call and every 10 s tick (to re-check the
-/// window when no submissions are arriving), draining the queue whenever allowed.
+/// The dispatcher runs validation whenever work arrives, but only starts copy work
+/// while the caching window is open.
 async fn dispatcher(io: CacheIO, shutdown: CancellationToken) {
     loop {
         tokio::select! {
@@ -253,51 +305,76 @@ async fn dispatcher(io: CacheIO, shutdown: CancellationToken) {
             _ = shutdown.cancelled() => break,
         }
 
-        let allowed = io.scheduler.is_caching_allowed();
-        tracing::debug!(
-            event = telemetry::EVENT_CACHING_WINDOW,
-            allowed,
-            "cache_io: window check",
-        );
-
         // Always run TTL sweep, even when the window is closed.
         io.expire_stale().await;
 
-        if !allowed {
-            continue;
-        }
-
-        // Drain the queue. Acquiring the semaphore permit before spawning
-        // provides backpressure: when all workers are busy the dispatcher
-        // blocks here (rather than pre-spawning unbounded tasks), so the
-        // queue reflects real backlog instead of just "in-flight + queued".
         loop {
-            if shutdown.is_cancelled() { break; }
-            let next = { io.state.lock().await.queue.pop_front() };
-            let Some((rel_path, _)) = next else { break };
+            if shutdown.is_cancelled() {
+                break;
+            }
 
-            let permit = io.semaphore.clone().acquire_owned().await
-                .expect("semaphore closed");
+            let allowed = io.scheduler.is_caching_allowed();
+            tracing::debug!(
+                event = telemetry::EVENT_CACHING_WINDOW,
+                allowed,
+                "cache_io: window check",
+            );
+
+            let next = {
+                let mut st = io.state.lock().await;
+                pop_next_job(&mut st.queue, allowed)
+            };
+            let Some(job) = next else { break };
 
             let io2 = io.clone();
+            if job.kind == CacheJobKind::Validate {
+                tokio::spawn(async move {
+                    job_worker(io2, job).await;
+                });
+                continue;
+            }
+
+            let permit = io
+                .semaphore
+                .clone()
+                .acquire_owned()
+                .await
+                .expect("semaphore closed");
+
             tokio::spawn(async move {
-                copy_worker(io2, rel_path).await;
+                job_worker(io2, job).await;
                 drop(permit);
             });
         }
     }
 }
 
-async fn copy_worker(io: CacheIO, rel_path: PathBuf) {
-    if io.cache.is_cached(&rel_path) {
+fn pop_next_job(queue: &mut VecDeque<CacheJob>, copy_allowed: bool) -> Option<CacheJob> {
+    if copy_allowed {
+        return queue.pop_front();
+    }
+    let idx = queue
+        .iter()
+        .position(|job| job.kind == CacheJobKind::Validate)?;
+    queue.remove(idx)
+}
+
+async fn populate_worker(io: CacheIO, rel_path: PathBuf, kind: CacheJobKind) {
+    if kind == CacheJobKind::Populate && io.cache.is_cached(&rel_path) {
         tracing::debug!("cache_io: {} already cached, skipping", rel_path.display());
-        finish_known(&io, &rel_path).await;
+        finish_known(&io, &rel_path, kind).await;
         return;
     }
 
     // Promote this entry from queued (None) to in-flight (Some(CopyControl)).
-    let control = Arc::new(CopyControl { abort: AtomicBool::new(false) });
-    io.state.lock().await.known.insert(rel_path.clone(), Some(Arc::clone(&control)));
+    let control = Arc::new(CopyControl {
+        abort: AtomicBool::new(false),
+    });
+    io.state
+        .lock()
+        .await
+        .known
+        .insert((rel_path.clone(), kind), Some(Arc::clone(&control)));
 
     // On-demand eviction: make room if needed. The evict_lock serialises concurrent
     // workers so they don't compute the same deletion set and over-evict.
@@ -321,7 +398,7 @@ async fn copy_worker(io: CacheIO, rel_path: PathBuf) {
             "cache_io: insufficient free space after eviction, skipping {}",
             rel_path.display(),
         );
-        finish_known(&io, &rel_path).await;
+        finish_known(&io, &rel_path, kind).await;
         return;
     }
 
@@ -342,8 +419,8 @@ async fn copy_worker(io: CacheIO, rel_path: PathBuf) {
     // Fires zero times for copies that complete in under 500 ms.
     {
         let ticker_bytes = Arc::clone(&bytes_copied);
-        let ticker_path  = rel_path.clone();
-        let ticker_size  = size_bytes;
+        let ticker_path = rel_path.clone();
+        let ticker_size = size_bytes;
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_millis(500));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -371,22 +448,17 @@ async fn copy_worker(io: CacheIO, rel_path: PathBuf) {
     let dest = cache_dest.clone();
     let progress = Arc::clone(&bytes_copied);
     let ctrl = control.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        perform_copy(&bs, &rel, &dest, &progress, Some(ctrl))
-    })
-    .await;
+    let result =
+        tokio::task::spawn_blocking(move || perform_copy(&bs, &rel, &dest, &progress, Some(ctrl)))
+            .await;
 
     // Stop the ticker before emitting COPY_COMPLETE / COPY_FAILED so no
     // late progress event races past the completion signal.
     let _ = done_tx.send(());
 
     match result {
-        Ok(Ok(())) => {
-            let (size, mtime_secs, mtime_nsecs) = match std::fs::metadata(&cache_dest) {
-                Ok(m) => (m.len(), m.mtime(), m.mtime_nsec()),
-                Err(_) => (0, 0, 0),
-            };
-            io.cache.mark_cached(&rel_path, size, mtime_secs, mtime_nsecs);
+        Ok(Ok(source_meta)) => {
+            io.cache.mark_cached(&rel_path, source_meta);
             tracing::info!(
                 event = telemetry::EVENT_COPY_COMPLETE,
                 path = %rel_path.display(),
@@ -412,15 +484,45 @@ async fn copy_worker(io: CacheIO, rel_path: PathBuf) {
         }
     }
 
-    finish_known(&io, &rel_path).await;
+    finish_known(&io, &rel_path, kind).await;
 }
 
-async fn finish_known(io: &CacheIO, rel_path: &Path) {
-    io.state.lock().await.known.remove(rel_path);
-    io.cache.cache_db().remove_deferred(rel_path);
+async fn finish_known(io: &CacheIO, rel_path: &Path, kind: CacheJobKind) {
+    io.state
+        .lock()
+        .await
+        .known
+        .remove(&(rel_path.to_path_buf(), kind));
+    if kind == CacheJobKind::Populate {
+        io.cache.cache_db().remove_deferred(rel_path);
+    }
 }
 
-async fn eviction_worker(cache: Arc<CacheManager>, interval_secs: u64, shutdown: CancellationToken) {
+async fn job_worker(io: CacheIO, job: CacheJob) {
+    match job.kind {
+        CacheJobKind::Populate => populate_worker(io, job.rel_path, job.kind).await,
+        CacheJobKind::Replace => populate_worker(io, job.rel_path, job.kind).await,
+        CacheJobKind::Validate => validate_worker(io, job.rel_path, job.kind).await,
+    }
+}
+
+async fn validate_worker(io: CacheIO, rel_path: PathBuf, kind: CacheJobKind) {
+    match io.cache.is_stale(&rel_path) {
+        StaleResult::Fresh | StaleResult::NotTracked => {}
+        StaleResult::NeedsBackfill(st) => io.cache.backfill_fingerprint(&rel_path, &st),
+        StaleResult::BackingGone => io
+            .cache
+            .drop_stale(&rel_path, telemetry::EVICTION_REASON_STALE_PERIODIC),
+        StaleResult::Stale => io.submit_replace(rel_path.clone()).await,
+    }
+    finish_known(&io, &rel_path, kind).await;
+}
+
+async fn eviction_worker(
+    cache: Arc<CacheManager>,
+    interval_secs: u64,
+    shutdown: CancellationToken,
+) {
     let mut ticker = tokio::time::interval(Duration::from_secs(interval_secs));
     ticker.tick().await;
     loop {
@@ -452,19 +554,34 @@ fn perform_copy(
     cache_dest: &Path,
     bytes_copied: &AtomicU64,
     control: Option<Arc<CopyControl>>,
-) -> std::io::Result<()> {
+) -> std::io::Result<SourceMetadata> {
     if let Some(parent) = cache_dest.parent() {
         std::fs::create_dir_all(parent)?;
     }
 
     let partial = partial_path(cache_dest);
+    let result = perform_copy_inner(bs, rel_path, cache_dest, &partial, bytes_copied, control);
+    if result.is_err() {
+        let _ = std::fs::remove_file(&partial);
+    }
+    result
+}
 
+fn perform_copy_inner(
+    bs: &BackingStore,
+    rel_path: &Path,
+    cache_dest: &Path,
+    partial: &Path,
+    bytes_copied: &AtomicU64,
+    control: Option<Arc<CopyControl>>,
+) -> std::io::Result<SourceMetadata> {
     let src_fd = bs.open_file(rel_path)?;
     // Safety: bs.open_file returns an owned fd. File::from_raw_fd takes
     // ownership, so Drop closes it on all return paths — no libc::close needed.
     let mut src = unsafe { File::from_raw_fd(src_fd) };
 
     let src_meta = src.metadata()?;
+    let source_snapshot = SourceMetadata::from_metadata(&src_meta);
     let file_size_bytes = src_meta.len();
     let initial_mtime = src_meta.mtime();
     let initial_size = src_meta.len() as i64;
@@ -476,21 +593,19 @@ fn perform_copy(
 
     let started = std::time::Instant::now();
 
-    let mut dst = match OpenOptions::new()
+    let mut dst = OpenOptions::new()
         .write(true)
         .create(true)
         .truncate(true)
-        .open(&partial)
-    {
-        Ok(f) => f,
-        Err(e) => return Err(e),
-    };
+        .open(&partial)?;
 
     let copy_result: std::io::Result<()> = (|| {
         let mut buf = vec![0u8; 256 * 1024];
         loop {
             let n = src.read(&mut buf)?;
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             dst.write_all(&buf[..n])?;
             bytes_copied.fetch_add(n as u64, Ordering::Relaxed);
         }
@@ -508,20 +623,22 @@ fn perform_copy(
     }
     drop(dst);
 
-    apply_source_metadata(&partial, &src_meta);
+    apply_source_metadata(&partial, &src_meta)?;
 
     // Before committing, verify the backing hasn't changed since the copy started.
     // Catches rename-replace and signals from the backing watcher (abort flag).
-    let aborted = control.as_ref().map_or(false, |c| c.abort.load(Ordering::Acquire));
-    let stale = bs.stat(rel_path).map_or(false, |s| {
-        s.st_size != initial_size || s.st_mtime != initial_mtime
+    let aborted = control
+        .as_ref()
+        .is_some_and(|c| c.abort.load(Ordering::Acquire));
+    let initial_mtime_nsec = src_meta.mtime_nsec();
+    let stale = bs.stat(rel_path).is_some_and(|s| {
+        s.st_size != initial_size
+            || s.st_mtime != initial_mtime
+            || s.st_mtime_nsec != initial_mtime_nsec
     });
     if aborted || stale {
         let _ = std::fs::remove_file(&partial);
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "backing changed during copy",
-        ));
+        return Err(std::io::Error::other("backing changed during copy"));
     }
 
     if let Err(e) = std::fs::rename(&partial, cache_dest) {
@@ -535,7 +652,7 @@ fn perform_copy(
         file_size_bytes as f64 / 1_048_576.0,
         started.elapsed().as_secs_f64(),
     );
-    Ok(())
+    Ok(source_snapshot)
 }
 
 fn partial_path(dest: &Path) -> PathBuf {
@@ -544,24 +661,35 @@ fn partial_path(dest: &Path) -> PathBuf {
     PathBuf::from(s)
 }
 
-/// Best-effort: all syscalls are fire-and-forget.
-fn apply_source_metadata(path: &Path, meta: &std::fs::Metadata) {
-    let Ok(c) = CString::new(path.as_os_str().as_bytes()) else { return };
+fn apply_source_metadata(path: &Path, meta: &std::fs::Metadata) -> std::io::Result<()> {
+    let c = CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "path contains NUL"))?;
     unsafe {
-        libc::chmod(c.as_ptr(), (meta.mode() & 0o7777) as libc::mode_t);
-        libc::lchown(c.as_ptr(), meta.uid(), meta.gid());
+        if libc::chmod(c.as_ptr(), (meta.mode() & 0o7777) as libc::mode_t) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if libc::lchown(c.as_ptr(), meta.uid(), meta.gid()) != 0 {
+            tracing::debug!(
+                "cache_io: lchown({}) failed: {}",
+                path.display(),
+                std::io::Error::last_os_error()
+            );
+        }
         let times = [
             libc::timespec {
-                tv_sec:  meta.atime()      as libc::time_t,
+                tv_sec: meta.atime() as libc::time_t,
                 tv_nsec: meta.atime_nsec() as libc::c_long,
             },
             libc::timespec {
-                tv_sec:  meta.mtime()      as libc::time_t,
+                tv_sec: meta.mtime() as libc::time_t,
                 tv_nsec: meta.mtime_nsec() as libc::c_long,
             },
         ];
-        libc::utimensat(libc::AT_FDCWD, c.as_ptr(), times.as_ptr(), 0);
+        if libc::utimensat(libc::AT_FDCWD, c.as_ptr(), times.as_ptr(), 0) != 0 {
+            return Err(std::io::Error::last_os_error());
+        }
     }
+    Ok(())
 }
 
 /// Thin wrapper around `perform_copy` for integration tests.
@@ -572,7 +700,7 @@ pub fn copy_for_tests(
     bs: &BackingStore,
     rel_path: &Path,
     cache_dest: &Path,
-) -> std::io::Result<()> {
+) -> std::io::Result<SourceMetadata> {
     let dummy = AtomicU64::new(0);
     perform_copy(bs, rel_path, cache_dest, &dummy, None)
 }

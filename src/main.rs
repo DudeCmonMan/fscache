@@ -314,7 +314,6 @@ async fn run_daemon(config_path: Option<PathBuf>) -> anyhow::Result<()> {
 
     let mut fuse_config = fuser::Config::default();
     fuse_config.mount_options = vec![
-        MountOption::RO,
         MountOption::AutoUnmount,
         MountOption::FSName(format!("fscache-{}", instance_name)),
     ];

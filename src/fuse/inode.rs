@@ -45,6 +45,60 @@ impl InodeTable {
         self.by_ino.get(&ino).map(|e| e.path.as_path())
     }
 
+    pub fn remove_path(&mut self, path: &Path) {
+        if path == Path::new("") {
+            return;
+        }
+        if let Some(ino) = self.by_path.remove(path) {
+            self.by_ino.remove(&ino);
+        }
+    }
+
+    pub fn rename_path(&mut self, old: &Path, new: &Path) {
+        if old == Path::new("") {
+            return;
+        }
+        self.remove_path(new);
+        if let Some(ino) = self.by_path.remove(old) {
+            if let Some(entry) = self.by_ino.get_mut(&ino) {
+                entry.path = new.to_path_buf();
+            }
+            self.by_path.insert(new.to_path_buf(), ino);
+        }
+
+        let descendants: Vec<_> = self
+            .by_path
+            .keys()
+            .filter(|path| path.starts_with(old) && *path != old)
+            .cloned()
+            .collect();
+        for old_child in descendants {
+            if let Ok(suffix) = old_child.strip_prefix(old) {
+                let new_child = new.join(suffix);
+                if let Some(ino) = self.by_path.remove(&old_child) {
+                    if let Some(entry) = self.by_ino.get_mut(&ino) {
+                        entry.path = new_child.clone();
+                    }
+                    self.by_path.insert(new_child, ino);
+                }
+            }
+        }
+    }
+
+    pub fn remove_subtree(&mut self, path: &Path) {
+        if path == Path::new("") {
+            return;
+        }
+        let paths: Vec<_> = self
+            .by_path
+            .keys()
+            .filter(|candidate| candidate.starts_with(path))
+            .cloned()
+            .collect();
+        for path in paths {
+            self.remove_path(&path);
+        }
+    }
     pub fn get_path_ino(&self, path: &Path) -> Option<u64> {
         self.by_path.get(path).copied()
     }

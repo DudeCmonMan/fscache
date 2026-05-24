@@ -21,10 +21,7 @@ use tokio_util::sync::CancellationToken;
 
 fn test_fuse_config() -> fuser::Config {
     let mut config = fuser::Config::default();
-    config.mount_options = vec![
-        MountOption::RO,
-        MountOption::FSName("fscache-test".to_string()),
-    ];
+    config.mount_options = vec![MountOption::FSName("fscache-test".to_string())];
     config.acl = SessionACL::Owner;
     config
 }
@@ -280,9 +277,7 @@ impl OvermountHarness {
     /// Create an overmount harness.
     ///
     /// `populate` is called with the directory path BEFORE the FUSE mount so
-    /// the closure can write test files while the path is still directly writable.
-    /// After `spawn_mount2` the path goes through FUSE (read-only), so no further
-    /// writes are possible via normal filesystem calls.
+    /// the closure can seed backing files before operations go through FUSE.
     ///
     /// Must be called from inside a `#[tokio::test]` — predictor/copier tasks
     /// are spawned on the current tokio runtime.
@@ -293,8 +288,8 @@ impl OvermountHarness {
         let dir = TempDir::new()?;
         let cache_dir = TempDir::new()?;
 
-        // Write all test files BEFORE the overmount — after mounting, the path
-        // goes through FUSE (RO) and std::fs::write would return EACCES.
+        // Seed test files before the overmount; subsequent filesystem operations
+        // exercise the FUSE passthrough layer.
         populate(dir.path());
 
         let mut fs = FsCache::new(dir.path())?;
@@ -349,7 +344,6 @@ impl OvermountHarness {
         // Clean unmount is guaranteed by drop ordering: _session drops first.
         let mut config = fuser::Config::default();
         config.mount_options = vec![
-            MountOption::RO,
             MountOption::CUSTOM("nonempty".to_string()),
             MountOption::FSName("fscache-overmount-test".to_string()),
         ];

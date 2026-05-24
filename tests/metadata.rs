@@ -285,3 +285,47 @@ async fn cached_file_preserves_metadata() {
         "cached file mtime should match source"
     );
 }
+
+/// setattr through the FUSE mount (chmod, truncate, utimens) must be forwarded
+/// to the backing filesystem. Previously the mount was read-only so these paths
+/// were never reachable.
+#[test]
+fn setattr_updates_backing() {
+    let h = FuseHarness::new().expect("FUSE mount failed");
+    write_backing_file(&h, "setattr.txt", b"hello world padding bytes ok");
+
+    let mount_file = h.mount_path().join("setattr.txt");
+    let backing_file = h.backing_path().join("setattr.txt");
+
+    std::thread::sleep(Duration::from_millis(100));
+
+    let new_mode = 0o640u32;
+    std::fs::set_permissions(&mount_file, std::fs::Permissions::from_mode(new_mode))
+        .expect("chmod through FUSE failed");
+    let backing_mode = std::fs::metadata(&backing_file).unwrap().permissions().mode();
+    assert_eq!(
+        backing_mode & 0o7777,
+        new_mode,
+        "chmod via FUSE mount must update backing file mode"
+    );
+
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&mount_file)
+        .unwrap()
+        .set_len(5)
+        .expect("truncate through FUSE failed");
+    assert_eq!(
+        std::fs::metadata(&backing_file).unwrap().len(),
+        5,
+        "truncate via FUSE mount must update backing file size"
+    );
+
+    let target_mtime = filetime::FileTime::from_unix_time(1_700_000_000, 0);
+    filetime::set_file_mtime(&mount_file, target_mtime).expect("utimens through FUSE failed");
+    assert_eq!(
+        std::fs::metadata(&backing_file).unwrap().mtime(),
+        1_700_000_000,
+        "utimens via FUSE mount must update backing file mtime"
+    );
+}

@@ -354,6 +354,41 @@ async fn attrib_change_keeps_cache_entry() {
     );
 }
 
+/// A write originating from the FUSE mount appears as an inotify IN_MODIFY on
+/// the backing directory. backing_watch must pick it up and invalidate the stale
+/// cache entry — the FUSE write path itself does no cache bookkeeping.
+#[tokio::test]
+async fn mount_write_evicts_stale_cache_entry() {
+    let h = BackingWatchHarness::new(DEBOUNCE_MS).unwrap();
+    let rel = PathBuf::from("mount_written.mkv");
+
+    std::fs::write(h.backing_path().join(&rel), b"original content padded____").unwrap();
+    h.cache_io.submit_cache(rel.clone()).await;
+    assert!(
+        wait_for_replaced(&h, &rel, b"original content padded____", Duration::from_secs(5)).await,
+        "file should be cached before mount write"
+    );
+
+    // Triggers an inotify IN_MODIFY that backing_watch must react to.
+    std::fs::write(h.mount_path().join(&rel), b"rewritten via fuse mount___").unwrap();
+
+    h.wait_for_debounce().await;
+
+    // backing_watch fires mark_abort + submit_validation; validation finds the
+    // fingerprint stale, drops the old entry, and submits a fresh cache copy.
+    let replaced = wait_for_replaced(
+        &h,
+        &rel,
+        b"rewritten via fuse mount___",
+        Duration::from_secs(5),
+    )
+    .await;
+    assert!(
+        replaced,
+        "mount write must trigger backing_watch invalidation and cache replacement"
+    );
+}
+
 #[tokio::test]
 async fn lru_evicted_watch_goes_blind() {
     // max_dirs=64: root (auto-seeded) + dir_00 fills 2 slots.

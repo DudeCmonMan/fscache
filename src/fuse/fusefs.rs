@@ -6,25 +6,24 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::backing_store::BackingStore;
-use crate::discovery::{DiscoveryController, OpKind};
+use crate::discovery::DiscoveryController;
 use crate::preset::{CachePreset, ProcessInfo};
 use crate::telemetry;
 
 use fuser::{
-    BsdFileFlags, Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags, Generation,
-    INodeNo, KernelConfig, LockOwner, OpenFlags, RenameFlags, ReplyAttr, ReplyCreate, ReplyData,
+    BsdFileFlags, Errno, FileAttr, FileHandle, FileType, Filesystem, FopenFlags, INodeNo,
+    KernelConfig, LockOwner, OpenFlags, RenameFlags, ReplyAttr, ReplyCreate, ReplyData,
     ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyWrite, ReplyXattr, Request, TimeOrNow,
     WriteFlags,
 };
 
 use super::inode::InodeTable;
-use super::util::{abs_to_cstring, io_to_errno, last_errno, rel_to_cstring};
+use super::util::abs_to_cstring;
 use crate::cache::db::SourceMetadata;
 use crate::cache::manager::CacheManager;
 use crate::engine::action::AccessEvent;
 
-/// Short TTL so the kernel re-checks after a cache file appears.
-const TTL: Duration = Duration::from_secs(1);
+pub(crate) const TTL: Duration = Duration::from_secs(1);
 
 /// Outcome of a FUSE open() call. Drives log emission, engine notification, and
 /// future cross-cutting hooks (e.g. process-discoverability).
@@ -48,7 +47,7 @@ pub enum OpenOutcome {
 pub struct FsCache {
     /// O_PATH fd opened to target_directory *before* the FUSE overmount.
     pub backing_store: Arc<BackingStore>,
-    inodes: Arc<Mutex<InodeTable>>,
+    pub(crate) inodes: Arc<Mutex<InodeTable>>,
     pub passthrough_mode: bool,
     pub cache: Option<Arc<CacheManager>>,
     pub access_tx: Option<tokio::sync::mpsc::UnboundedSender<AccessEvent>>,
@@ -56,14 +55,11 @@ pub struct FsCache {
     /// Optional preset that controls open-time filtering and future caching actions.
     pub preset: Option<Arc<dyn CachePreset>>,
     pub discovery: Option<Arc<DiscoveryController>>,
-    recent_logs: Mutex<HashMap<PathBuf, std::time::Instant>>,
-    /// Bytes read per open file handle — emitted as telemetry on release.
-    open_bytes: Mutex<HashMap<u64, u64>>,
-    /// Path for each open file handle — used to send on_close events.
-    open_paths: Mutex<HashMap<u64, PathBuf>>,
-    /// Write passthrough handles are kept separate from read telemetry.
-    write_paths: Mutex<HashMap<u64, PathBuf>>,
-    append_handles: Mutex<HashSet<u64>>,
+    pub(crate) recent_logs: Mutex<HashMap<PathBuf, std::time::Instant>>,
+    pub(crate) open_bytes: Mutex<HashMap<u64, u64>>,
+    pub(crate) open_paths: Mutex<HashMap<u64, PathBuf>>,
+    pub(crate) write_paths: Mutex<HashMap<u64, PathBuf>>,
+    pub(crate) append_handles: Mutex<HashSet<u64>>,
     /// Handle to the backing-directory inotify watcher. None when feature is disabled.
     pub backing_watch: Option<crate::backing_watch::BackingWatchHandle>,
 }
@@ -123,11 +119,11 @@ impl FsCache {
         }
     }
 
-    fn stat_backing(&self, rel_path: &Path) -> Option<libc::stat> {
+    pub(crate) fn stat_backing(&self, rel_path: &Path) -> Option<libc::stat> {
         self.backing_store.stat(rel_path)
     }
 
-    fn stat_to_attr(&self, ino: u64, s: &libc::stat) -> FileAttr {
+    pub(crate) fn stat_to_attr(&self, ino: u64, s: &libc::stat) -> FileAttr {
         let kind = mode_to_filetype(s.st_mode);
         FileAttr {
             ino: INodeNo(ino),
@@ -148,7 +144,7 @@ impl FsCache {
         }
     }
 
-    fn source_metadata_to_attr(&self, ino: u64, m: &SourceMetadata) -> FileAttr {
+    pub(crate) fn source_metadata_to_attr(&self, ino: u64, m: &SourceMetadata) -> FileAttr {
         FileAttr {
             ino: INodeNo(ino),
             size: m.size,
@@ -171,7 +167,7 @@ impl FsCache {
         }
     }
 
-    fn cached_regular_attr(&self, rel_path: &Path, ino: u64) -> Option<FileAttr> {
+    pub(crate) fn cached_regular_attr(&self, rel_path: &Path, ino: u64) -> Option<FileAttr> {
         let cache = self.cache.as_ref()?;
         if !cache.is_cached(rel_path) {
             return None;
@@ -181,7 +177,7 @@ impl FsCache {
             .map(|m| self.source_metadata_to_attr(ino, &m))
     }
 
-    fn list_dir_entries(
+    pub(crate) fn list_dir_entries(
         &self,
         dir_fd: RawFd,
         parent_path: &Path,
@@ -264,14 +260,14 @@ impl FsCache {
         entries
     }
 
-    fn is_write_intent(flags: i32) -> bool {
+    pub(crate) fn is_write_intent(flags: i32) -> bool {
         let access_mode = flags & libc::O_ACCMODE;
         access_mode == libc::O_WRONLY
             || access_mode == libc::O_RDWR
             || flags & (libc::O_TRUNC | libc::O_APPEND) != 0
     }
 
-    fn child_path(&self, parent: INodeNo, name: &OsStr) -> Result<PathBuf, Errno> {
+    pub(crate) fn child_path(&self, parent: INodeNo, name: &OsStr) -> Result<PathBuf, Errno> {
         let parent_path = self
             .inodes
             .lock()
@@ -286,7 +282,7 @@ impl FsCache {
         })
     }
 
-    fn path_for_ino(&self, ino: INodeNo) -> Result<PathBuf, Errno> {
+    pub(crate) fn path_for_ino(&self, ino: INodeNo) -> Result<PathBuf, Errno> {
         self.inodes
             .lock()
             .unwrap()
@@ -295,119 +291,10 @@ impl FsCache {
             .ok_or(Errno::ENOENT)
     }
 
-    fn fresh_attr_for_path(&self, path: &Path) -> Result<(u64, FileAttr), Errno> {
+    pub(crate) fn fresh_attr_for_path(&self, path: &Path) -> Result<(u64, FileAttr), Errno> {
         let stat = self.stat_backing(path).ok_or(Errno::ENOENT)?;
         let ino = self.inodes.lock().unwrap().get_or_create(path);
         Ok((ino, self.stat_to_attr(ino, &stat)))
-    }
-
-    fn open_write_handle(
-        &self,
-        path: &Path,
-        flags: i32,
-        mode: u32,
-        pid: u32,
-    ) -> Result<RawFd, Errno> {
-        let fd = self
-            .backing_store
-            .open_file_with_flags(path, flags, mode)
-            .map_err(io_to_errno)?;
-        let fh = fd as u64;
-        self.write_paths
-            .lock()
-            .unwrap()
-            .insert(fh, path.to_path_buf());
-        if flags & libc::O_APPEND != 0 {
-            self.append_handles.lock().unwrap().insert(fh);
-        }
-        tracing::debug!(path = %path.display(), flags, pid, "write passthrough open");
-        Ok(fd)
-    }
-
-    ///
-    /// `filtered` is passed through only to determine the return outcome (Hit vs
-    /// Miss vs Filtered) — it does not affect which store is attempted.
-    fn try_open(&self, path: &Path, filtered: bool) -> Result<(i32, OpenOutcome), Errno> {
-        if !self.passthrough_mode
-            && let Some(ref cache) = self.cache
-            && cache.is_cached(path)
-        {
-            let cache_path = cache.cache_path(path);
-            let c = abs_to_cstring(&cache_path);
-            let fd = unsafe { libc::open(c.as_ptr(), libc::O_RDONLY) };
-            if fd >= 0 {
-                cache.mark_hit(path);
-                return Ok((fd, OpenOutcome::Hit));
-            }
-            tracing::debug!(
-                path = %path.display(),
-                cache_path = %cache_path.display(),
-                error = %std::io::Error::last_os_error(),
-                "cache hit race, falling back to backing store"
-            );
-        }
-
-        let fd = self
-            .backing_store
-            .open_file(path)
-            .map_err(|_| Errno::from_i32(last_errno()))?;
-        Ok((
-            fd,
-            if filtered {
-                OpenOutcome::Filtered
-            } else {
-                OpenOutcome::Miss
-            },
-        ))
-    }
-
-    /// Emit the appropriate tracing line for an open() outcome.
-    ///
-    /// HIT is always INFO (confirms cache is working; never suppressed).
-    /// Filtered is always INFO ("ignored process access").
-    /// Miss respects the repeat-log suppress window: DEBUG when suppressed, INFO otherwise.
-    fn log_open_outcome(
-        &self,
-        path: &Path,
-        opener: Option<&str>,
-        pid: u32,
-        outcome: OpenOutcome,
-        suppress: bool,
-    ) {
-        let opener = opener.unwrap_or("?");
-        match outcome {
-            OpenOutcome::Hit => {
-                tracing::info!(
-                    event = telemetry::EVENT_CACHE_HIT,
-                    path = %path.display(),
-                    "cache HIT: {:?} (serving from SSD)", path,
-                );
-            }
-            OpenOutcome::Filtered => {
-                tracing::info!(
-                    "ignored process access: {:?} (filtered by preset, not caching) [opener: {} pid={}]",
-                    path,
-                    opener,
-                    pid,
-                );
-            }
-            OpenOutcome::Miss if suppress => {
-                tracing::debug!(
-                    event = telemetry::EVENT_CACHE_MISS,
-                    path = %path.display(),
-                    "cache MISS: {:?} (serving from backing store) [opener: {} pid={}]",
-                    path, opener, pid,
-                );
-            }
-            OpenOutcome::Miss => {
-                tracing::info!(
-                    event = telemetry::EVENT_CACHE_MISS,
-                    path = %path.display(),
-                    "cache MISS: {:?} (serving from backing store) [opener: {} pid={}]",
-                    path, opener, pid,
-                );
-            }
-        }
     }
 }
 
@@ -422,46 +309,7 @@ impl Filesystem for FsCache {
     }
 
     fn lookup(&self, req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
-        let parent_path = match self.inodes.lock().unwrap().get_path(parent.0) {
-            Some(p) => p.to_path_buf(),
-            None => {
-                reply.error(Errno::ENOENT);
-                return;
-            }
-        };
-
-        let child_path = if parent_path == Path::new("") {
-            PathBuf::from(name)
-        } else {
-            parent_path.join(name)
-        };
-
-        let ino = self.inodes.lock().unwrap().get_or_create(&child_path);
-
-        if let Some(attr) = self.cached_regular_attr(&child_path, ino) {
-            if let Some(ref d) = self.discovery {
-                d.log_touch(req.pid(), OpKind::Meta);
-            }
-            reply.entry(&TTL, &attr, Generation(0));
-            return;
-        }
-
-        let Some(stat) = self.stat_backing(&child_path) else {
-            reply.error(Errno::ENOENT);
-            return;
-        };
-
-        if let Some(ref d) = self.discovery {
-            d.log_touch(req.pid(), OpKind::Meta);
-        }
-        if stat.st_mode & libc::S_IFMT == libc::S_IFDIR
-            && let Some(ref bw) = self.backing_watch
-        {
-            bw.touch(child_path.clone(), ino);
-        }
-
-        let attr = self.stat_to_attr(ino, &stat);
-        reply.entry(&TTL, &attr, Generation(0));
+        self.do_lookup(req, parent, name, reply)
     }
 
     fn forget(&self, _req: &Request, ino: INodeNo, nlookup: u64) {
@@ -470,7 +318,7 @@ impl Filesystem for FsCache {
 
     fn setattr(
         &self,
-        _req: &Request,
+        req: &Request,
         ino: INodeNo,
         mode: Option<u32>,
         uid: Option<u32>,
@@ -478,112 +326,27 @@ impl Filesystem for FsCache {
         size: Option<u64>,
         atime: Option<TimeOrNow>,
         mtime: Option<TimeOrNow>,
-        _ctime: Option<SystemTime>,
+        ctime: Option<SystemTime>,
         fh: Option<FileHandle>,
-        _crtime: Option<SystemTime>,
-        _chgtime: Option<SystemTime>,
-        _bkuptime: Option<SystemTime>,
-        _flags: Option<BsdFileFlags>,
+        crtime: Option<SystemTime>,
+        chgtime: Option<SystemTime>,
+        bkuptime: Option<SystemTime>,
+        flags: Option<BsdFileFlags>,
         reply: ReplyAttr,
     ) {
-        let path = match self.path_for_ino(ino) {
-            Ok(path) => path,
-            Err(e) => {
-                reply.error(e);
-                return;
-            }
-        };
-
-        if let Some(mode) = mode {
-            if let Err(e) = self.backing_store.chmod(&path, mode).map_err(io_to_errno) {
-                reply.error(e);
-                return;
-            }
-        }
-        if uid.is_some() || gid.is_some() {
-            if let Err(e) = self
-                .backing_store
-                .chown(&path, uid, gid)
-                .map_err(io_to_errno)
-            {
-                reply.error(e);
-                return;
-            }
-        }
-        if let Some(size) = size {
-            let result = if let Some(fh) = fh {
-                let rc = unsafe { libc::ftruncate(fh.0 as RawFd, size as libc::off_t) };
-                if rc == 0 {
-                    Ok(())
-                } else {
-                    Err(io_to_errno(std::io::Error::last_os_error()))
-                }
-            } else {
-                self.backing_store
-                    .truncate(&path, size)
-                    .map_err(io_to_errno)
-            };
-            if let Err(e) = result {
-                reply.error(e);
-                return;
-            }
-        }
-        if atime.is_some() || mtime.is_some() {
-            let current = match self.stat_backing(&path) {
-                Some(stat) => stat,
-                None => {
-                    reply.error(Errno::ENOENT);
-                    return;
-                }
-            };
-            let atime = time_or_now_to_timespec(atime, current.st_atime, current.st_atime_nsec);
-            let mtime = time_or_now_to_timespec(mtime, current.st_mtime, current.st_mtime_nsec);
-            if let Err(e) = self
-                .backing_store
-                .utimens(&path, atime, mtime)
-                .map_err(io_to_errno)
-            {
-                reply.error(e);
-                return;
-            }
-        }
-
-        match self.stat_backing(&path) {
-            Some(stat) => reply.attr(&TTL, &self.stat_to_attr(ino.0, &stat)),
-            None => reply.error(Errno::ENOENT),
-        }
+        self.do_setattr(
+            req, ino, mode, uid, gid, size, atime, mtime, ctime, fh, crtime, chgtime, bkuptime,
+            flags, reply,
+        )
     }
 
     fn getattr(&self, req: &Request, ino: INodeNo, _fh: Option<FileHandle>, reply: ReplyAttr) {
-        let path = match self.inodes.lock().unwrap().get_path(ino.0) {
-            Some(p) => p.to_path_buf(),
-            None => {
-                reply.error(Errno::ENOENT);
-                return;
-            }
-        };
-
-        if let Some(attr) = self.cached_regular_attr(&path, ino.0) {
-            if let Some(ref d) = self.discovery {
-                d.log_touch(req.pid(), OpKind::Meta);
-            }
-            reply.attr(&TTL, &attr);
-            return;
-        }
-
-        let Some(stat) = self.stat_backing(&path) else {
-            reply.error(Errno::ENOENT);
-            return;
-        };
-        if let Some(ref d) = self.discovery {
-            d.log_touch(req.pid(), OpKind::Meta);
-        }
-        reply.attr(&TTL, &self.stat_to_attr(ino.0, &stat));
+        self.do_getattr(req, ino, reply)
     }
 
     fn mknod(
         &self,
-        _req: &Request,
+        req: &Request,
         parent: INodeNo,
         name: &OsStr,
         mode: u32,
@@ -591,121 +354,43 @@ impl Filesystem for FsCache {
         rdev: u32,
         reply: ReplyEntry,
     ) {
-        let path = match self.child_path(parent, name) {
-            Ok(path) => path,
-            Err(e) => {
-                reply.error(e);
-                return;
-            }
-        };
-        if let Err(e) = self
-            .backing_store
-            .mknod(&path, apply_umask(mode, umask), rdev)
-            .map_err(io_to_errno)
-        {
-            reply.error(e);
-            return;
-        }
-        match self.fresh_attr_for_path(&path) {
-            Ok((_ino, attr)) => reply.entry(&TTL, &attr, Generation(0)),
-            Err(e) => reply.error(e),
-        }
+        self.do_mknod(req, parent, name, mode, umask, rdev, reply)
     }
 
     fn mkdir(
         &self,
-        _req: &Request,
+        req: &Request,
         parent: INodeNo,
         name: &OsStr,
         mode: u32,
         umask: u32,
         reply: ReplyEntry,
     ) {
-        let path = match self.child_path(parent, name) {
-            Ok(path) => path,
-            Err(e) => {
-                reply.error(e);
-                return;
-            }
-        };
-        if let Err(e) = self
-            .backing_store
-            .mkdir(&path, apply_umask(mode, umask))
-            .map_err(io_to_errno)
-        {
-            reply.error(e);
-            return;
-        }
-        match self.fresh_attr_for_path(&path) {
-            Ok((_ino, attr)) => reply.entry(&TTL, &attr, Generation(0)),
-            Err(e) => reply.error(e),
-        }
+        self.do_mkdir(req, parent, name, mode, umask, reply)
     }
 
-    fn unlink(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
-        let path = match self.child_path(parent, name) {
-            Ok(path) => path,
-            Err(e) => {
-                reply.error(e);
-                return;
-            }
-        };
-        if let Err(e) = self.backing_store.unlink_file(&path).map_err(io_to_errno) {
-            reply.error(e);
-            return;
-        }
-        self.inodes.lock().unwrap().remove_path(&path);
-        reply.ok();
+    fn unlink(&self, req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
+        self.do_unlink(req, parent, name, reply)
     }
 
-    fn rmdir(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
-        let path = match self.child_path(parent, name) {
-            Ok(path) => path,
-            Err(e) => {
-                reply.error(e);
-                return;
-            }
-        };
-        if let Err(e) = self.backing_store.rmdir(&path).map_err(io_to_errno) {
-            reply.error(e);
-            return;
-        }
-        self.inodes.lock().unwrap().remove_subtree(&path);
-        reply.ok();
+    fn rmdir(&self, req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
+        self.do_rmdir(req, parent, name, reply)
     }
 
     fn symlink(
         &self,
-        _req: &Request,
+        req: &Request,
         parent: INodeNo,
         link_name: &OsStr,
         target: &Path,
         reply: ReplyEntry,
     ) {
-        let path = match self.child_path(parent, link_name) {
-            Ok(path) => path,
-            Err(e) => {
-                reply.error(e);
-                return;
-            }
-        };
-        if let Err(e) = self
-            .backing_store
-            .symlink(target.as_os_str(), &path)
-            .map_err(io_to_errno)
-        {
-            reply.error(e);
-            return;
-        }
-        match self.fresh_attr_for_path(&path) {
-            Ok((_ino, attr)) => reply.entry(&TTL, &attr, Generation(0)),
-            Err(e) => reply.error(e),
-        }
+        self.do_symlink(req, parent, link_name, target, reply)
     }
 
     fn rename(
         &self,
-        _req: &Request,
+        req: &Request,
         parent: INodeNo,
         name: &OsStr,
         newparent: INodeNo,
@@ -713,62 +398,18 @@ impl Filesystem for FsCache {
         flags: RenameFlags,
         reply: ReplyEmpty,
     ) {
-        let old = match self.child_path(parent, name) {
-            Ok(path) => path,
-            Err(e) => {
-                reply.error(e);
-                return;
-            }
-        };
-        let new = match self.child_path(newparent, newname) {
-            Ok(path) => path,
-            Err(e) => {
-                reply.error(e);
-                return;
-            }
-        };
-        if let Err(e) = self
-            .backing_store
-            .rename(&old, &new, flags.bits())
-            .map_err(io_to_errno)
-        {
-            reply.error(e);
-            return;
-        }
-        self.inodes.lock().unwrap().rename_path(&old, &new);
-        reply.ok();
+        self.do_rename(req, parent, name, newparent, newname, flags, reply)
     }
 
     fn link(
         &self,
-        _req: &Request,
+        req: &Request,
         ino: INodeNo,
         newparent: INodeNo,
         newname: &OsStr,
         reply: ReplyEntry,
     ) {
-        let old = match self.path_for_ino(ino) {
-            Ok(path) => path,
-            Err(e) => {
-                reply.error(e);
-                return;
-            }
-        };
-        let new = match self.child_path(newparent, newname) {
-            Ok(path) => path,
-            Err(e) => {
-                reply.error(e);
-                return;
-            }
-        };
-        if let Err(e) = self.backing_store.link(&old, &new).map_err(io_to_errno) {
-            reply.error(e);
-            return;
-        }
-        match self.fresh_attr_for_path(&new) {
-            Ok((_ino, attr)) => reply.entry(&TTL, &attr, Generation(0)),
-            Err(e) => reply.error(e),
-        }
+        self.do_link(req, ino, newparent, newname, reply)
     }
 
     fn open(&self, req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
@@ -880,69 +521,31 @@ impl Filesystem for FsCache {
 
     fn read(
         &self,
-        _req: &Request,
-        _ino: INodeNo,
+        req: &Request,
+        ino: INodeNo,
         fh: FileHandle,
         offset: u64,
         size: u32,
-        _flags: OpenFlags,
-        _lock_owner: Option<LockOwner>,
+        flags: OpenFlags,
+        lock_owner: Option<LockOwner>,
         reply: ReplyData,
     ) {
-        let mut buf = vec![0u8; size as usize];
-        let n = unsafe {
-            libc::pread(
-                fh.0 as RawFd,
-                buf.as_mut_ptr() as *mut libc::c_void,
-                size as libc::size_t,
-                offset as libc::off_t,
-            )
-        };
-        if n < 0 {
-            reply.error(Errno::from_i32(last_errno()));
-            return;
-        }
-        buf.truncate(n as usize);
-
-        // Accumulate bytes read for telemetry emitted on release.
-        if let Some(bytes) = self.open_bytes.lock().unwrap().get_mut(&fh.0) {
-            *bytes += n as u64;
-        }
-
-        reply.data(&buf);
+        self.do_read(req, ino, fh, offset, size, flags, lock_owner, reply)
     }
 
     fn write(
         &self,
-        _req: &Request,
-        _ino: INodeNo,
+        req: &Request,
+        ino: INodeNo,
         fh: FileHandle,
         offset: u64,
         data: &[u8],
-        _write_flags: WriteFlags,
+        write_flags: WriteFlags,
         flags: OpenFlags,
-        _lock_owner: Option<LockOwner>,
+        lock_owner: Option<LockOwner>,
         reply: ReplyWrite,
     ) {
-        let append =
-            self.append_handles.lock().unwrap().contains(&fh.0) || flags.0 & libc::O_APPEND != 0;
-        let n = if append {
-            unsafe { libc::write(fh.0 as RawFd, data.as_ptr().cast(), data.len()) }
-        } else {
-            unsafe {
-                libc::pwrite(
-                    fh.0 as RawFd,
-                    data.as_ptr().cast(),
-                    data.len(),
-                    offset as libc::off_t,
-                )
-            }
-        };
-        if n < 0 {
-            reply.error(Errno::from_i32(last_errno()));
-        } else {
-            reply.written(n as u32);
-        }
+        self.do_write(req, ino, fh, offset, data, write_flags, flags, lock_owner, reply)
     }
 
     fn flush(
@@ -958,23 +561,15 @@ impl Filesystem for FsCache {
 
     fn fsync(
         &self,
-        _req: &Request,
-        _ino: INodeNo,
+        req: &Request,
+        ino: INodeNo,
         fh: FileHandle,
         datasync: bool,
         reply: ReplyEmpty,
     ) {
-        let rc = if datasync {
-            unsafe { libc::fdatasync(fh.0 as RawFd) }
-        } else {
-            unsafe { libc::fsync(fh.0 as RawFd) }
-        };
-        if rc == 0 {
-            reply.ok();
-        } else {
-            reply.error(Errno::from_i32(last_errno()));
-        }
+        self.do_fsync(req, ino, fh, datasync, reply)
     }
+
     fn release(
         &self,
         _req: &Request,
@@ -1005,68 +600,18 @@ impl Filesystem for FsCache {
     }
 
     fn opendir(&self, req: &Request, ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
-        let path = match self.inodes.lock().unwrap().get_path(ino.0) {
-            Some(p) => p.to_path_buf(),
-            None => {
-                reply.error(Errno::ENOENT);
-                return;
-            }
-        };
-        if let Some(ref d) = self.discovery {
-            d.log_touch(req.pid(), OpKind::Meta);
-        }
-
-        // O_PATH fds can't be used with fdopendir, so always open via openat with real flags.
-        let c_path = if path == Path::new("") {
-            rel_to_cstring(Path::new("."))
-        } else {
-            rel_to_cstring(&path)
-        };
-        let fd = unsafe {
-            libc::openat(
-                self.backing_store.fd(),
-                c_path.as_ptr(),
-                libc::O_RDONLY | libc::O_DIRECTORY,
-            )
-        };
-
-        if fd < 0 {
-            reply.error(Errno::from_i32(last_errno()));
-            return;
-        }
-
-        reply.opened(FileHandle(fd as u64), FopenFlags::empty());
+        self.do_opendir(req, ino, reply)
     }
 
     fn readdir(
         &self,
-        _req: &Request,
+        req: &Request,
         ino: INodeNo,
         fh: FileHandle,
         offset: u64,
-        mut reply: ReplyDirectory,
+        reply: ReplyDirectory,
     ) {
-        let parent_path = match self.inodes.lock().unwrap().get_path(ino.0) {
-            Some(p) => p.to_path_buf(),
-            None => {
-                reply.error(Errno::ENOENT);
-                return;
-            }
-        };
-
-        let entries = self.list_dir_entries(fh.0 as RawFd, &parent_path);
-
-        for (i, (name, entry_ino, kind)) in entries.iter().enumerate() {
-            let next_offset = (i + 1) as u64;
-            if next_offset <= offset {
-                continue;
-            }
-            if reply.add(INodeNo(*entry_ino), next_offset, *kind, name) {
-                break;
-            }
-        }
-
-        reply.ok();
+        self.do_readdir(req, ino, fh, offset, reply)
     }
 
     fn releasedir(
@@ -1077,35 +622,11 @@ impl Filesystem for FsCache {
         _flags: OpenFlags,
         reply: ReplyEmpty,
     ) {
-        unsafe { libc::close(fh.0 as RawFd) };
-        reply.ok();
+        self.do_releasedir(fh, reply)
     }
 
-    fn readlink(&self, _req: &Request, ino: INodeNo, reply: ReplyData) {
-        let path = match self.inodes.lock().unwrap().get_path(ino.0) {
-            Some(p) => p.to_path_buf(),
-            None => {
-                reply.error(Errno::ENOENT);
-                return;
-            }
-        };
-
-        let c_path = rel_to_cstring(&path);
-        let mut buf = vec![0u8; libc::PATH_MAX as usize];
-        let len = unsafe {
-            libc::readlinkat(
-                self.backing_store.fd(),
-                c_path.as_ptr(),
-                buf.as_mut_ptr() as *mut libc::c_char,
-                buf.len(),
-            )
-        };
-        if len < 0 {
-            reply.error(Errno::from_i32(last_errno()));
-        } else {
-            buf.truncate(len as usize);
-            reply.data(&buf);
-        }
+    fn readlink(&self, req: &Request, ino: INodeNo, reply: ReplyData) {
+        self.do_readlink(req, ino, reply)
     }
 
     fn create(
@@ -1118,49 +639,12 @@ impl Filesystem for FsCache {
         flags: i32,
         reply: ReplyCreate,
     ) {
-        let path = match self.child_path(parent, name) {
-            Ok(path) => path,
-            Err(e) => {
-                reply.error(e);
-                return;
-            }
-        };
-        let fd = match self.open_write_handle(
-            &path,
-            flags | libc::O_CREAT,
-            apply_umask(mode, umask),
-            req.pid(),
-        ) {
-            Ok(fd) => fd,
-            Err(e) => {
-                reply.error(e);
-                return;
-            }
-        };
-        match self.fresh_attr_for_path(&path) {
-            Ok((_ino, attr)) => reply.created(
-                &TTL,
-                &attr,
-                Generation(0),
-                FileHandle(fd as u64),
-                FopenFlags::empty(),
-            ),
-            Err(e) => {
-                unsafe { libc::close(fd) };
-                self.write_paths.lock().unwrap().remove(&(fd as u64));
-                self.append_handles.lock().unwrap().remove(&(fd as u64));
-                if let Err(unlink_err) = self.backing_store.unlink_file(&path).map_err(io_to_errno)
-                {
-                    tracing::debug!(path = %path.display(), error = ?unlink_err, "failed to clean up create after attr lookup failure");
-                }
-                reply.error(e);
-            }
-        }
+        self.do_create(req, parent, name, mode, umask, flags, reply)
     }
 
     fn setxattr(
         &self,
-        _req: &Request,
+        req: &Request,
         ino: INodeNo,
         name: &OsStr,
         value: &[u8],
@@ -1168,118 +652,27 @@ impl Filesystem for FsCache {
         position: u32,
         reply: ReplyEmpty,
     ) {
-        if position != 0 {
-            reply.error(Errno::ENOSYS);
-            return;
-        }
-        let path = match self.path_for_ino(ino) {
-            Ok(path) => path,
-            Err(e) => {
-                reply.error(e);
-                return;
-            }
-        };
-        match self
-            .backing_store
-            .setxattr(&path, name, value, flags)
-            .map_err(io_to_errno)
-        {
-            Ok(()) => reply.ok(),
-            Err(e) => reply.error(e),
-        }
+        self.do_setxattr(req, ino, name, value, flags, position, reply)
     }
 
-    fn getxattr(&self, _req: &Request, ino: INodeNo, name: &OsStr, size: u32, reply: ReplyXattr) {
-        let path = match self.path_for_ino(ino) {
-            Ok(path) => path,
-            Err(e) => {
-                reply.error(e);
-                return;
-            }
-        };
-        match self
-            .backing_store
-            .getxattr(&path, name, size)
-            .map_err(io_to_errno)
-        {
-            Ok(data) if size == 0 => reply.size(data.len() as u32),
-            Ok(data) => reply.data(&data),
-            Err(e) => reply.error(e),
-        }
+    fn getxattr(&self, req: &Request, ino: INodeNo, name: &OsStr, size: u32, reply: ReplyXattr) {
+        self.do_getxattr(req, ino, name, size, reply)
     }
 
-    fn listxattr(&self, _req: &Request, ino: INodeNo, size: u32, reply: ReplyXattr) {
-        let path = match self.path_for_ino(ino) {
-            Ok(path) => path,
-            Err(e) => {
-                reply.error(e);
-                return;
-            }
-        };
-        match self
-            .backing_store
-            .listxattr(&path, size)
-            .map_err(io_to_errno)
-        {
-            Ok(data) if size == 0 => reply.size(data.len() as u32),
-            Ok(data) => reply.data(&data),
-            Err(e) => reply.error(e),
-        }
+    fn listxattr(&self, req: &Request, ino: INodeNo, size: u32, reply: ReplyXattr) {
+        self.do_listxattr(req, ino, size, reply)
     }
 
-    fn removexattr(&self, _req: &Request, ino: INodeNo, name: &OsStr, reply: ReplyEmpty) {
-        let path = match self.path_for_ino(ino) {
-            Ok(path) => path,
-            Err(e) => {
-                reply.error(e);
-                return;
-            }
-        };
-        match self
-            .backing_store
-            .removexattr(&path, name)
-            .map_err(io_to_errno)
-        {
-            Ok(()) => reply.ok(),
-            Err(e) => reply.error(e),
-        }
+    fn removexattr(&self, req: &Request, ino: INodeNo, name: &OsStr, reply: ReplyEmpty) {
+        self.do_removexattr(req, ino, name, reply)
     }
 
-    fn statfs(&self, _req: &Request, _ino: INodeNo, reply: fuser::ReplyStatfs) {
-        // backing_fd is O_PATH and cannot be used with fstatvfs directly.
-        let dot = rel_to_cstring(Path::new("."));
-        let real_fd = unsafe {
-            libc::openat(
-                self.backing_store.fd(),
-                dot.as_ptr(),
-                libc::O_RDONLY | libc::O_DIRECTORY,
-            )
-        };
-        if real_fd < 0 {
-            reply.error(Errno::from_i32(last_errno()));
-            return;
-        }
-        let mut buf: libc::statvfs = unsafe { std::mem::zeroed() };
-        let rc = unsafe { libc::fstatvfs(real_fd, &mut buf) };
-        unsafe { libc::close(real_fd) };
-        if rc != 0 {
-            reply.error(Errno::from_i32(last_errno()));
-            return;
-        }
-        reply.statfs(
-            buf.f_blocks,
-            buf.f_bfree,
-            buf.f_bavail,
-            buf.f_files,
-            buf.f_ffree,
-            buf.f_bsize as u32,
-            buf.f_namemax as u32,
-            buf.f_frsize as u32,
-        );
+    fn statfs(&self, req: &Request, ino: INodeNo, reply: fuser::ReplyStatfs) {
+        self.do_statfs(req, ino, reply)
     }
 }
 
-fn time_or_now_to_timespec(
+pub(crate) fn time_or_now_to_timespec(
     value: Option<TimeOrNow>,
     fallback_sec: i64,
     fallback_nsec: i64,
@@ -1302,7 +695,7 @@ fn system_time_to_timespec(t: SystemTime) -> libc::timespec {
     }
 }
 
-fn apply_umask(mode: u32, umask: u32) -> u32 {
+pub(crate) fn apply_umask(mode: u32, umask: u32) -> u32 {
     mode & !umask
 }
 

@@ -30,6 +30,7 @@ const POLL_TICK_SECS: u64 = 3;
 pub async fn run_client(socket_path: PathBuf) -> anyhow::Result<()> {
     let (hello, mut reader, writer) = client::connect(&socket_path).await?;
 
+    let sqlite_config = hello.config.sqlite.clone();
     let state = Arc::new(DashboardState::new(Arc::new(hello.config)));
     {
         let mut mounts = state.mounts.lock().unwrap();
@@ -43,7 +44,7 @@ pub async fn run_client(socket_path: PathBuf) -> anyhow::Result<()> {
     }
 
     let db_path = PathBuf::from(&hello.db_path);
-    let db = Arc::new(CacheDb::open_readonly(&db_path)?);
+    let db = Arc::new(CacheDb::open_readonly_with_config(&db_path, &sqlite_config)?);
 
     let mount_dirs: Vec<PathBuf> = hello.mounts.iter()
         .map(|m| m.cache_dir.clone())

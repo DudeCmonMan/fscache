@@ -294,6 +294,9 @@ log_directory          = "/var/log/fscache"
 console_level          = "info"
 file_level             = "debug"
 repeat_log_window_secs = 300
+
+[sqlite]
+cache_size_mb = 64
 ```
 
 ### Prefetch example

@@ -50,6 +50,7 @@ fn test_config() -> Arc<Config> {
         invalidation:   fscache::config::InvalidationConfig::default(),
         discovery:      DiscoveryConfig::default(),
         backing_watch:  fscache::config::BackingWatchConfig::default(),
+        sqlite:         fscache::config::SqliteConfig::default(),
     })
 }
 

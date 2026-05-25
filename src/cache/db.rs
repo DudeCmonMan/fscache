@@ -6,6 +6,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use rusqlite::{Connection, params};
 use std::os::unix::fs::MetadataExt;
 
+use crate::config::SqliteConfig;
+
+const SQLITE_BUSY_TIMEOUT_MS: u64 = 1000;
+const SQLITE_STMT_CACHE_CAPACITY: usize = 32;
+
 /// Snapshot of a file's source-side identity at copy time.
 /// Used to detect whether a backing file has been rewritten since it was cached.
 /// All three fields being zero means a pre-migration row — treat as needing backfill.
@@ -98,6 +103,24 @@ impl SourceMetadata {
     }
 }
 
+/// Apply PRAGMAs and connection settings common to both read-write and read-only
+/// connections. `cache_size_mb` drives two tied tuning knobs:
+///
+/// - `cache_size`: per-connection LRU page cache (true private RAM).
+/// - `mmap_size`: bytes of the DB file memory-mapped into the process's virtual
+///   address space; backed by shared OS pages, so it does not multiply per
+///   process. NOTE: an I/O error on the mapped region delivers SIGBUS rather
+///   than a recoverable error — vanishingly rare on healthy storage.
+fn apply_common_pragmas(conn: &Connection, cache_size_mb: u32) -> anyhow::Result<()> {
+    let cache_kb: i64 = -((cache_size_mb as i64).saturating_mul(1024));
+    let mmap_bytes: i64 = (cache_size_mb as i64).saturating_mul(1024 * 1024);
+    conn.pragma_update(None, "cache_size", cache_kb)?;
+    conn.pragma_update(None, "mmap_size", mmap_bytes)?;
+    conn.pragma_update(None, "temp_store", "MEMORY")?;
+    conn.busy_timeout(Duration::from_millis(SQLITE_BUSY_TIMEOUT_MS))?;
+    Ok(())
+}
+
 /// SQLite-backed cache metadata store.
 ///
 /// Tracks which files are cached (for eviction intelligence) and persists
@@ -110,11 +133,19 @@ pub struct CacheDb {
 }
 
 impl CacheDb {
-    /// Open (or create) the SQLite database at `path`, applying schema migrations.
+    /// Open (or create) the SQLite database at `path` with default SQLite config.
     pub fn open(path: &Path) -> anyhow::Result<Self> {
+        Self::open_with_config(path, &SqliteConfig::default())
+    }
+
+    /// Open (or create) the SQLite database at `path`, applying schema migrations
+    /// and connection tuning from `sqlite`.
+    pub fn open_with_config(path: &Path, sqlite: &SqliteConfig) -> anyhow::Result<Self> {
         let conn = Connection::open(path)?;
         // WAL gives concurrent readers without blocking the single writer.
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")?;
+        apply_common_pragmas(&conn, sqlite.cache_size_mb)?;
+        conn.set_prepared_statement_cache_capacity(SQLITE_STMT_CACHE_CAPACITY);
         conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS cache_files (
@@ -205,20 +236,19 @@ impl CacheDb {
         let now = now_secs() as i64;
         let key = rel_path.to_string_lossy();
         let conn = self.conn.lock().unwrap();
-        let _ = conn.execute(
+        let _ = conn.prepare_cached(
             "INSERT OR REPLACE INTO cache_files \
              (rel_path, mount_id, size_bytes, cached_at, last_hit_at, hit_count, \
               source_mtime_secs, source_mtime_nsecs, source_size_bytes, source_blocks, \
               source_atime_sec, source_atime_nsec, source_ctime_sec, source_ctime_nsec, \
               source_mode, source_nlink, source_uid, source_gid, source_rdev, source_blksize) \
              VALUES (?1, ?2, ?3, ?4, ?4, 1, ?5, ?6, ?3, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
-            params![
-                key.as_ref(), mount_id, source.size as i64, now, source.mtime_sec, source.mtime_nsec,
-                source.blocks as i64, source.atime_sec, source.atime_nsec, source.ctime_sec, source.ctime_nsec,
-                source.mode as i64, source.nlink as i64, source.uid as i64, source.gid as i64,
-                source.rdev as i64, source.blksize as i64,
-            ],
-        );
+        ).and_then(|mut s| s.execute(params![
+            key.as_ref(), mount_id, source.size as i64, now, source.mtime_sec, source.mtime_nsec,
+            source.blocks as i64, source.atime_sec, source.atime_nsec, source.ctime_sec, source.ctime_nsec,
+            source.mode as i64, source.nlink as i64, source.uid as i64, source.gid as i64,
+            source.rdev as i64, source.blksize as i64,
+        ]));
         tracing::info!(event = crate::telemetry::EVENT_DB_INSERT, path = %rel_path.display(), size_bytes = source.size, "db: mark_cached {}", rel_path.display());
     }
 
@@ -227,21 +257,19 @@ impl CacheDb {
         let now = now_secs() as i64;
         let key = rel_path.to_string_lossy();
         let conn = self.conn.lock().unwrap();
-        let _ = conn.execute(
+        let _ = conn.prepare_cached(
             "UPDATE cache_files SET last_hit_at = ?1, hit_count = hit_count + 1 \
              WHERE rel_path = ?2 AND mount_id = ?3",
-            params![now, key.as_ref(), mount_id],
-        );
+        ).and_then(|mut s| s.execute(params![now, key.as_ref(), mount_id]));
         tracing::info!(event = crate::telemetry::EVENT_DB_HIT, path = %rel_path.display(), "db: mark_hit {}", rel_path.display());
     }
 
     pub fn remove(&self, rel_path: &Path, mount_id: &str) {
         let key = rel_path.to_string_lossy();
         let conn = self.conn.lock().unwrap();
-        let _ = conn.execute(
+        let _ = conn.prepare_cached(
             "DELETE FROM cache_files WHERE rel_path = ?1 AND mount_id = ?2",
-            params![key.as_ref(), mount_id],
-        );
+        ).and_then(|mut s| s.execute(params![key.as_ref(), mount_id]));
         tracing::info!(event = crate::telemetry::EVENT_DB_REMOVE, path = %rel_path.display(), "db: remove {}", rel_path.display());
     }
 
@@ -249,7 +277,7 @@ impl CacheDb {
     /// with their recorded size in bytes. Pass `usize::MAX` to retrieve all candidates.
     pub fn eviction_candidates(&self, mount_id: &str, limit: usize) -> Vec<(PathBuf, u64)> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = match conn.prepare(
+        let mut stmt = match conn.prepare_cached(
             "SELECT rel_path, size_bytes FROM cache_files \
              WHERE mount_id = ?1 ORDER BY last_hit_at ASC LIMIT ?2",
         ) {
@@ -323,7 +351,7 @@ impl CacheDb {
 
         let db_paths: Vec<String> = {
             let mut stmt =
-                match conn.prepare("SELECT rel_path FROM cache_files WHERE mount_id = ?1") {
+                match conn.prepare_cached("SELECT rel_path FROM cache_files WHERE mount_id = ?1") {
                     Ok(s) => s,
                     Err(_) => {
                         tracing::warn!("db: reconcile_with_disk prepare failed");
@@ -340,10 +368,9 @@ impl CacheDb {
         let mut orphan_count = 0usize;
         for rel in &db_paths {
             if !cache_dir.join(rel).exists() {
-                let _ = conn.execute(
+                let _ = conn.prepare_cached(
                     "DELETE FROM cache_files WHERE rel_path = ?1 AND mount_id = ?2",
-                    params![rel, mount_id],
-                );
+                ).and_then(|mut s| s.execute(params![rel, mount_id]));
                 orphan_count += 1;
             }
         }
@@ -357,21 +384,19 @@ impl CacheDb {
                 Err(_) => continue,
             };
             let exists: bool = conn
-                .query_row(
+                .prepare_cached(
                     "SELECT COUNT(*) FROM cache_files WHERE rel_path = ?1 AND mount_id = ?2",
-                    params![rel, mount_id],
-                    |row| row.get::<_, i64>(0),
                 )
+                .and_then(|mut s| s.query_row(params![rel, mount_id], |row| row.get::<_, i64>(0)))
                 .unwrap_or(0)
                 > 0;
             if !exists {
                 let size = std::fs::metadata(abs_path).map(|m| m.len()).unwrap_or(0) as i64;
-                let _ = conn.execute(
+                let _ = conn.prepare_cached(
                     "INSERT OR IGNORE INTO cache_files \
                      (rel_path, mount_id, size_bytes, cached_at, last_hit_at) \
                      VALUES (?1, ?2, ?3, ?4, ?4)",
-                    params![rel, mount_id, size, now],
-                );
+                ).and_then(|mut s| s.execute(params![rel, mount_id, size, now]));
                 new_count += 1;
             }
         }
@@ -389,15 +414,14 @@ impl CacheDb {
     /// Persist a single deferred event entry (key = show-root path).
     pub fn save_deferred(&self, key: &Path, path: &Path, timestamp: u64) {
         let conn = self.conn.lock().unwrap();
-        let _ = conn.execute(
+        let _ = conn.prepare_cached(
             "INSERT OR REPLACE INTO deferred_events (key, path, timestamp) \
              VALUES (?1, ?2, ?3)",
-            params![
-                key.to_string_lossy().as_ref(),
-                path.to_string_lossy().as_ref(),
-                timestamp as i64,
-            ],
-        );
+        ).and_then(|mut s| s.execute(params![
+            key.to_string_lossy().as_ref(),
+            path.to_string_lossy().as_ref(),
+            timestamp as i64,
+        ]));
     }
 
     /// Load deferred events, discarding entries older than `ttl_minutes`.
@@ -406,7 +430,7 @@ impl CacheDb {
         let cutoff = now_secs().saturating_sub(ttl_minutes * 60) as i64;
         let conn = self.conn.lock().unwrap();
         let mut stmt = match conn
-            .prepare("SELECT key, path, timestamp FROM deferred_events WHERE timestamp >= ?1")
+            .prepare_cached("SELECT key, path, timestamp FROM deferred_events WHERE timestamp >= ?1")
         {
             Ok(s) => s,
             Err(_) => return vec![],
@@ -425,21 +449,28 @@ impl CacheDb {
 
     pub fn remove_deferred(&self, key: &Path) {
         let conn = self.conn.lock().unwrap();
-        let _ = conn.execute(
+        let _ = conn.prepare_cached(
             "DELETE FROM deferred_events WHERE key = ?1",
-            params![key.to_string_lossy().as_ref()],
-        );
+        ).and_then(|mut s| s.execute(params![key.to_string_lossy().as_ref()]));
     }
 
-    /// Open the database in read-only mode for use by the watch client.
+    /// Open the database in read-only mode with default SQLite config.
     ///
     /// Uses `PRAGMA query_only=1` to prevent accidental writes. WAL mode on the
     /// daemon side allows concurrent read access without blocking writers.
     pub fn open_readonly(path: &Path) -> anyhow::Result<Self> {
-        // Open in read-write mode first so rusqlite can apply the WAL checkpoint
-        // pragmas on first open; query_only prevents any actual mutations.
+        Self::open_readonly_with_config(path, &SqliteConfig::default())
+    }
+
+    /// Open the database in read-only mode for use by the watch client or TUI.
+    ///
+    /// Opens read-write then sets `PRAGMA query_only=1` so rusqlite can apply WAL
+    /// checkpoint pragmas on first open while preventing any actual mutations.
+    pub fn open_readonly_with_config(path: &Path, sqlite: &SqliteConfig) -> anyhow::Result<Self> {
         let conn = Connection::open(path)?;
         conn.execute_batch("PRAGMA query_only=1;")?;
+        apply_common_pragmas(&conn, sqlite.cache_size_mb)?;
+        conn.set_prepared_statement_cache_capacity(SQLITE_STMT_CACHE_CAPACITY);
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -452,7 +483,7 @@ impl CacheDb {
         mount_id: &str,
     ) -> (u64, Vec<(PathBuf, u64, SystemTime, SystemTime)>) {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = match conn.prepare(
+        let mut stmt = match conn.prepare_cached(
             "SELECT rel_path, size_bytes, cached_at, last_hit_at \
              FROM cache_files WHERE mount_id = ?1",
         ) {
@@ -485,7 +516,7 @@ impl CacheDb {
     pub fn file_timestamps(&self, mount_id: &str) -> HashMap<PathBuf, (SystemTime, SystemTime)> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = match conn
-            .prepare("SELECT rel_path, cached_at, last_hit_at FROM cache_files WHERE mount_id = ?1")
+            .prepare_cached("SELECT rel_path, cached_at, last_hit_at FROM cache_files WHERE mount_id = ?1")
         {
             Ok(s) => s,
             Err(_) => return HashMap::new(),
@@ -512,13 +543,14 @@ impl CacheDb {
         let key = rel_path.to_string_lossy();
         let conn = self.conn.lock().unwrap();
         let meta = conn
-            .query_row(
+            .prepare_cached(
                 "SELECT source_size_bytes, source_blocks, source_atime_sec, source_atime_nsec, \
                     source_mtime_secs, source_mtime_nsecs, source_ctime_sec, source_ctime_nsec, \
                     source_mode, source_nlink, source_uid, source_gid, source_rdev, source_blksize \
              FROM cache_files WHERE rel_path = ?1 AND mount_id = ?2",
-                params![key.as_ref(), mount_id],
-                |row| {
+            )
+            .and_then(|mut s| {
+                s.query_row(params![key.as_ref(), mount_id], |row| {
                     Ok(SourceMetadata {
                         size: row.get::<_, i64>(0)?.max(0) as u64,
                         blocks: row.get::<_, i64>(1)?.max(0) as u64,
@@ -535,8 +567,8 @@ impl CacheDb {
                         rdev: row.get::<_, i64>(12)?.max(0) as u64,
                         blksize: row.get::<_, i64>(13)?.max(0) as u32,
                     })
-                },
-            )
+                })
+            })
             .ok()?;
         meta.has_snapshot().then_some(meta)
     }
@@ -545,11 +577,12 @@ impl CacheDb {
     pub fn fingerprint_row(&self, rel_path: &Path, mount_id: &str) -> Option<Fingerprint> {
         let key = rel_path.to_string_lossy();
         let conn = self.conn.lock().unwrap();
-        conn.query_row(
+        conn.prepare_cached(
             "SELECT source_mtime_secs, source_mtime_nsecs, size_bytes \
              FROM cache_files WHERE rel_path = ?1 AND mount_id = ?2",
-            params![key.as_ref(), mount_id],
-            |row| {
+        )
+        .and_then(|mut s| {
+            s.query_row(params![key.as_ref(), mount_id], |row| {
                 let secs: i64 = row.get(0)?;
                 let nsecs: i64 = row.get(1)?;
                 let size: i64 = row.get(2)?;
@@ -558,8 +591,8 @@ impl CacheDb {
                     source_mtime_nsecs: nsecs,
                     size_bytes: size.max(0) as u64,
                 })
-            },
-        )
+            })
+        })
         .ok()
     }
 
@@ -567,7 +600,7 @@ impl CacheDb {
     /// Used by the maintenance sweep to avoid per-file DB round-trips.
     pub fn all_fingerprints(&self, mount_id: &str) -> Vec<(PathBuf, Fingerprint)> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = match conn.prepare(
+        let mut stmt = match conn.prepare_cached(
             "SELECT rel_path, source_mtime_secs, source_mtime_nsecs, size_bytes \
              FROM cache_files WHERE mount_id = ?1",
         ) {
@@ -599,10 +632,9 @@ impl CacheDb {
     pub fn set_last_hit_at_for_test(&self, rel_path: &Path, mount_id: &str, timestamp_secs: i64) {
         let key = rel_path.to_string_lossy();
         let conn = self.conn.lock().unwrap();
-        let _ = conn.execute(
+        let _ = conn.prepare_cached(
             "UPDATE cache_files SET last_hit_at = ?1 WHERE rel_path = ?2 AND mount_id = ?3",
-            params![timestamp_secs, key.as_ref(), mount_id],
-        );
+        ).and_then(|mut s| s.execute(params![timestamp_secs, key.as_ref(), mount_id]));
     }
 }
 
@@ -664,7 +696,7 @@ impl CacheDb {
         limit: usize,
     ) -> anyhow::Result<Vec<ProcessSummary>> {
         let conn = self.conn.lock().unwrap();
-        let mut stmt = conn.prepare(
+        let mut stmt = conn.prepare_cached(
             "SELECT process_name,
                     SUM(CASE WHEN op_kind = 'hit'  THEN count ELSE 0 END),
                     SUM(CASE WHEN op_kind = 'miss' THEN count ELSE 0 END),
@@ -713,10 +745,9 @@ impl CacheDb {
 
     pub fn prune_process_access(&self, cutoff_epoch: i64) -> anyhow::Result<usize> {
         let conn = self.conn.lock().unwrap();
-        let n = conn.execute(
+        let n = conn.prepare_cached(
             "DELETE FROM process_access WHERE bucket_epoch < ?1",
-            params![cutoff_epoch],
-        )?;
+        ).and_then(|mut s| s.execute(params![cutoff_epoch]))?;
         Ok(n)
     }
 }
@@ -744,4 +775,44 @@ fn remove_partials(dir: &Path) -> usize {
         }
     }
     count
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::SqliteConfig;
+
+    #[test]
+    fn pragma_tuning_writer() {
+        let f = tempfile::NamedTempFile::new().unwrap();
+        let db = CacheDb::open_with_config(f.path(), &SqliteConfig { cache_size_mb: 64 }).unwrap();
+        let conn = db.conn.lock().unwrap();
+        let cache_size: i64 = conn.pragma_query_value(None, "cache_size", |r| r.get(0)).unwrap();
+        let mmap_size: i64 = conn.pragma_query_value(None, "mmap_size", |r| r.get(0)).unwrap();
+        let temp_store: i64 = conn.pragma_query_value(None, "temp_store", |r| r.get(0)).unwrap();
+        let busy_timeout: i64 = conn.pragma_query_value(None, "busy_timeout", |r| r.get(0)).unwrap();
+        assert_eq!(cache_size, -65536);
+        assert_eq!(mmap_size, 67108864);
+        assert_eq!(temp_store, 2);  // 2 = MEMORY
+        assert_eq!(busy_timeout, 1000);
+    }
+
+    #[test]
+    fn pragma_tuning_readonly() {
+        let f = tempfile::NamedTempFile::new().unwrap();
+        // Create the schema via the writer first so the file is a valid WAL db.
+        let _ = CacheDb::open_with_config(f.path(), &SqliteConfig { cache_size_mb: 64 }).unwrap();
+        let db = CacheDb::open_readonly_with_config(f.path(), &SqliteConfig { cache_size_mb: 64 }).unwrap();
+        let conn = db.conn.lock().unwrap();
+        let cache_size: i64 = conn.pragma_query_value(None, "cache_size", |r| r.get(0)).unwrap();
+        let mmap_size: i64 = conn.pragma_query_value(None, "mmap_size", |r| r.get(0)).unwrap();
+        let temp_store: i64 = conn.pragma_query_value(None, "temp_store", |r| r.get(0)).unwrap();
+        let busy_timeout: i64 = conn.pragma_query_value(None, "busy_timeout", |r| r.get(0)).unwrap();
+        let query_only: i64 = conn.pragma_query_value(None, "query_only", |r| r.get(0)).unwrap();
+        assert_eq!(cache_size, -65536);
+        assert_eq!(mmap_size, 67108864);
+        assert_eq!(temp_store, 2);
+        assert_eq!(busy_timeout, 1000);
+        assert_eq!(query_only, 1);
+    }
 }

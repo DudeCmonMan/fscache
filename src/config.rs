@@ -25,6 +25,8 @@ pub struct Config {
     pub discovery: DiscoveryConfig,
     #[serde(default)]
     pub backing_watch: BackingWatchConfig,
+    #[serde(default)]
+    pub sqlite: SqliteConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -431,4 +433,37 @@ pub fn load_from(path: &PathBuf) -> anyhow::Result<(Config, PathBuf)> {
         .with_context(|| format!("failed to parse {}", path.display()))?;
     validate_instance_name(&config.paths.instance_name)?;
     Ok((config, path.clone()))
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct SqliteConfig {
+    /// SQLite page-cache and mmap budget per connection. The daemon, TUI, and stats
+    /// readers each hold their own private page cache (true per-connection RAM); the
+    /// mmap region is virtual address space backed by shared OS-cached pages and does
+    /// not multiply across processes.
+    #[serde(default = "default_sqlite_cache_size_mb")]
+    pub cache_size_mb: u32,
+}
+
+impl Default for SqliteConfig {
+    fn default() -> Self { Self { cache_size_mb: default_sqlite_cache_size_mb() } }
+}
+
+fn default_sqlite_cache_size_mb() -> u32 { 64 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sqlite_defaults_when_section_absent() {
+        let toml = r#"
+[paths]
+target_directories = ["/media"]
+cache_directory    = "/cache"
+instance_name      = "test"
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        assert_eq!(config.sqlite.cache_size_mb, 64);
+    }
 }

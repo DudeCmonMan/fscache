@@ -198,12 +198,12 @@ async fn run_daemon(config_path: Option<PathBuf>) -> anyhow::Result<()> {
     let db_path = db_dir.join(format!("{instance_name}.db"));
     tracing::info!("Database: {}", db_path.display());
 
-    let db = Arc::new(cache::db::CacheDb::open(&db_path).unwrap_or_else(|e| {
+    let db = Arc::new(cache::db::CacheDb::open_with_config(&db_path, &config.sqlite).unwrap_or_else(|e| {
         tracing::warn!(
             "failed to open cache DB {}: {e} — falling back to in-memory DB",
             db_path.display()
         );
-        cache::db::CacheDb::open(std::path::Path::new(":memory:")).expect("in-memory DB must open")
+        cache::db::CacheDb::open_with_config(std::path::Path::new(":memory:"), &config.sqlite).expect("in-memory DB must open")
     }));
 
     let eviction = config::EvictionConfig::resolve(&config.eviction, &config.cache);

@@ -48,3 +48,6 @@ log_directory          = "/var/log/fscache"
 console_level          = "${FSCACHE_CONSOLE_LEVEL}"
 file_level             = "${FSCACHE_FILE_LEVEL}"
 repeat_log_window_secs = ${FSCACHE_REPEAT_LOG_WINDOW_SECS}
+
+[sqlite]
+cache_size_mb = ${FSCACHE_SQLITE_CACHE_SIZE_MB}

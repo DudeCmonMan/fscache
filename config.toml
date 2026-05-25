@@ -108,3 +108,14 @@ window_days = 7                          # Retain DB rows and log files for this
 bucket_interval_secs = 60               # Flush in-memory counts to DB and emit SNAP lines this often (minimum 1)
 pid_lru_capacity = 512                   # Max PIDs to cache per session — avoids repeated /proc reads for short-lived processes
 pid_lru_ttl_secs = 300                  # Evict PID cache entries older than this (guards against PID reuse)
+
+# ---------------------------------------------------------------------------
+# [sqlite] — SQLite connection tuning
+# ---------------------------------------------------------------------------
+[sqlite]
+# Page-cache and mmap budget per connection. Drives two tuned-together knobs:
+#   cache_size: per-connection LRU page cache (true private RAM per connection).
+#   mmap_size:  maps DB file into virtual address space; backed by shared OS
+#               pages so it does NOT multiply across daemon/TUI/watch processes.
+# Raise on systems with ample RAM and large libraries. Lower if RSS matters.
+cache_size_mb = 64

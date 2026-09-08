@@ -1,3 +1,4 @@
+mod credentials;
 pub mod fusefs;
 mod inode;
 pub(crate) mod util;

@@ -315,6 +315,7 @@ async fn run_daemon(config_path: Option<PathBuf>) -> anyhow::Result<()> {
     let mut fuse_config = fuser::Config::default();
     fuse_config.mount_options = vec![
         MountOption::AutoUnmount,
+        MountOption::DefaultPermissions,
         MountOption::FSName(format!("fscache-{}", instance_name)),
     ];
     fuse_config.acl = SessionACL::All;

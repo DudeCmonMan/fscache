@@ -423,7 +423,7 @@ impl Filesystem for FsCache {
 
         let raw_flags = flags.0;
         if Self::is_write_intent(raw_flags) {
-            match self.open_write_handle(&path, raw_flags, 0, req.pid()) {
+            match self.open_write_handle(req, &path, raw_flags, 0, req.pid()) {
                 Ok(fd) => reply.opened(FileHandle(fd as u64), FopenFlags::empty()),
                 Err(e) => reply.error(e),
             }
@@ -478,7 +478,7 @@ impl Filesystem for FsCache {
 
         tracing::debug!(event = telemetry::EVENT_FUSE_OPEN, path = %path.display(), "fuse open");
 
-        let (fd, outcome) = match self.try_open(&path, filtered) {
+        let (fd, outcome) = match self.try_open(req, &path, filtered) {
             Ok(v) => v,
             Err(e) => {
                 reply.error(e);

@@ -9,12 +9,17 @@ use fuser::{
 
 use crate::discovery::OpKind;
 use crate::telemetry;
+use crate::fuse::credentials::RequestCredentials;
 
 use super::fusefs::{FsCache, OpenOutcome, TTL};
 use super::util::{abs_to_cstring, io_to_errno, last_errno, rel_to_cstring};
 
 impl FsCache {
-    pub(crate) fn try_open(&self, path: &Path, filtered: bool) -> Result<(i32, OpenOutcome), Errno> {
+    pub(crate) fn try_open(&self,
+        req: &Request,
+        path: &Path,
+        filtered: bool
+    ) -> Result<(i32, OpenOutcome), Errno> {
         if !self.passthrough_mode
             && let Some(ref cache) = self.cache
             && cache.is_cached(path)
@@ -33,6 +38,8 @@ impl FsCache {
                 "cache hit race, falling back to backing store"
             );
         }
+
+        let _credentials = RequestCredentials::enter(req).map_err(io_to_errno)?;
 
         let fd = self
             .backing_store
@@ -212,6 +219,13 @@ impl FsCache {
             rel_to_cstring(Path::new("."))
         } else {
             rel_to_cstring(&path)
+        };
+        let _credentials = match RequestCredentials::enter(req) {
+            Ok(credentials) => credentials,
+            Err(e) => {
+                reply.error(io_to_errno(e));
+                return;
+            }
         };
         let fd = unsafe {
             libc::openat(

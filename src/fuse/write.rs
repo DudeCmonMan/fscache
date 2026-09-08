@@ -11,15 +11,20 @@ use fuser::{
 
 use super::fusefs::{apply_umask, time_or_now_to_timespec, FsCache, TTL};
 use super::util::{io_to_errno, last_errno};
+use super::credentials::RequestCredentials;
 
 impl FsCache {
     pub(crate) fn open_write_handle(
         &self,
+        req: &Request,
         path: &Path,
         flags: i32,
         mode: u32,
         pid: u32,
     ) -> Result<RawFd, Errno> {
+        let _credentials =
+            super::credentials::RequestCredentials::enter(req).map_err(io_to_errno)?;
+
         let fd = self
             .backing_store
             .open_file_with_flags(path, flags, mode)
@@ -124,7 +129,7 @@ impl FsCache {
 
     pub(crate) fn do_mknod(
         &self,
-        _req: &Request,
+        req: &Request,
         parent: INodeNo,
         name: &OsStr,
         mode: u32,
@@ -132,6 +137,13 @@ impl FsCache {
         rdev: u32,
         reply: ReplyEntry,
     ) {
+        let _credentials = match RequestCredentials::enter(req) {
+            Ok(credentials) => credentials,
+            Err(e) => {
+                reply.error(io_to_errno(e));
+                return;
+            }
+        };
         let path = match self.child_path(parent, name) {
             Ok(path) => path,
             Err(e) => {
@@ -155,13 +167,20 @@ impl FsCache {
 
     pub(crate) fn do_mkdir(
         &self,
-        _req: &Request,
+        req: &Request,
         parent: INodeNo,
         name: &OsStr,
         mode: u32,
         umask: u32,
         reply: ReplyEntry,
     ) {
+        let _credentials = match RequestCredentials::enter(req) {
+            Ok(credentials) => credentials,
+            Err(e) => {
+                reply.error(io_to_errno(e));
+                return;
+            }
+        };
         let path = match self.child_path(parent, name) {
             Ok(path) => path,
             Err(e) => {
@@ -183,11 +202,18 @@ impl FsCache {
         }
     }
 
-    pub(crate) fn do_unlink(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
+    pub(crate) fn do_unlink(&self, req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
         let path = match self.child_path(parent, name) {
             Ok(path) => path,
             Err(e) => {
                 reply.error(e);
+                return;
+            }
+        };
+        let _credentials = match RequestCredentials::enter(req) {
+            Ok(credentials) => credentials,
+            Err(e) => {
+                reply.error(io_to_errno(e));
                 return;
             }
         };
@@ -199,11 +225,18 @@ impl FsCache {
         reply.ok();
     }
 
-    pub(crate) fn do_rmdir(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
+    pub(crate) fn do_rmdir(&self, req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
         let path = match self.child_path(parent, name) {
             Ok(path) => path,
             Err(e) => {
                 reply.error(e);
+                return;
+            }
+        };
+        let _credentials = match RequestCredentials::enter(req) {
+            Ok(credentials) => credentials,
+            Err(e) => {
+                reply.error(io_to_errno(e));
                 return;
             }
         };
@@ -217,12 +250,19 @@ impl FsCache {
 
     pub(crate) fn do_symlink(
         &self,
-        _req: &Request,
+        req: &Request,
         parent: INodeNo,
         link_name: &OsStr,
         target: &Path,
         reply: ReplyEntry,
     ) {
+        let _credentials = match RequestCredentials::enter(req) {
+            Ok(credentials) => credentials,
+            Err(e) => {
+                reply.error(io_to_errno(e));
+                return;
+            }
+        };
         let path = match self.child_path(parent, link_name) {
             Ok(path) => path,
             Err(e) => {
@@ -246,7 +286,7 @@ impl FsCache {
 
     pub(crate) fn do_rename(
         &self,
-        _req: &Request,
+        req: &Request,
         parent: INodeNo,
         name: &OsStr,
         newparent: INodeNo,
@@ -254,6 +294,13 @@ impl FsCache {
         flags: RenameFlags,
         reply: ReplyEmpty,
     ) {
+        let _credentials = match RequestCredentials::enter(req) {
+            Ok(credentials) => credentials,
+            Err(e) => {
+                reply.error(io_to_errno(e));
+                return;
+            }
+        };
         let old = match self.child_path(parent, name) {
             Ok(path) => path,
             Err(e) => {
@@ -282,12 +329,19 @@ impl FsCache {
 
     pub(crate) fn do_link(
         &self,
-        _req: &Request,
+        req: &Request,
         ino: INodeNo,
         newparent: INodeNo,
         newname: &OsStr,
         reply: ReplyEntry,
     ) {
+        let _credentials = match RequestCredentials::enter(req) {
+            Ok(credentials) => credentials,
+            Err(e) => {
+                reply.error(io_to_errno(e));
+                return;
+            }
+        };
         let old = match self.path_for_ino(ino) {
             Ok(path) => path,
             Err(e) => {
@@ -383,6 +437,7 @@ impl FsCache {
             }
         };
         let fd = match self.open_write_handle(
+            req,
             &path,
             flags | libc::O_CREAT,
             apply_umask(mode, umask),

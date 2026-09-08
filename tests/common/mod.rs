@@ -344,7 +344,6 @@ impl OvermountHarness {
         // Clean unmount is guaranteed by drop ordering: _session drops first.
         let mut config = fuser::Config::default();
         config.mount_options = vec![
-            MountOption::CUSTOM("nonempty".to_string()),
             MountOption::FSName("fscache-overmount-test".to_string()),
         ];
         config.acl = SessionACL::Owner;

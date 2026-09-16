@@ -36,6 +36,17 @@ impl FsCache {
         Ok(fd)
     }
 
+    fn chown_to_requester(&self, path: &Path, req: &Request) {
+        let parent_is_setgid = path
+            .parent()
+            .and_then(|parent| self.backing_store.stat(parent))
+            .is_some_and(|parent| parent.st_mode & libc::S_ISGID != 0);
+        let gid = if parent_is_setgid { None } else { Some(req.gid()) };
+        if let Err(e) = self.backing_store.chown(path, Some(req.uid()), gid) {
+            tracing::warn!(path = %path.display(), error = %e, "could not hand ownership to requester");
+        }
+    }
+
     pub(crate) fn do_setattr(
         &self,
         _req: &Request,
@@ -124,7 +135,7 @@ impl FsCache {
 
     pub(crate) fn do_mknod(
         &self,
-        _req: &Request,
+        req: &Request,
         parent: INodeNo,
         name: &OsStr,
         mode: u32,
@@ -147,6 +158,7 @@ impl FsCache {
             reply.error(e);
             return;
         }
+        self.chown_to_requester(&path, req);
         match self.fresh_attr_for_path(&path) {
             Ok((_ino, attr)) => reply.entry(&TTL, &attr, Generation(0)),
             Err(e) => reply.error(e),
@@ -155,7 +167,7 @@ impl FsCache {
 
     pub(crate) fn do_mkdir(
         &self,
-        _req: &Request,
+        req: &Request,
         parent: INodeNo,
         name: &OsStr,
         mode: u32,
@@ -177,6 +189,7 @@ impl FsCache {
             reply.error(e);
             return;
         }
+        self.chown_to_requester(&path, req);
         match self.fresh_attr_for_path(&path) {
             Ok((_ino, attr)) => reply.entry(&TTL, &attr, Generation(0)),
             Err(e) => reply.error(e),
@@ -217,7 +230,7 @@ impl FsCache {
 
     pub(crate) fn do_symlink(
         &self,
-        _req: &Request,
+        req: &Request,
         parent: INodeNo,
         link_name: &OsStr,
         target: &Path,
@@ -238,6 +251,7 @@ impl FsCache {
             reply.error(e);
             return;
         }
+        self.chown_to_requester(&path, req);
         match self.fresh_attr_for_path(&path) {
             Ok((_ino, attr)) => reply.entry(&TTL, &attr, Generation(0)),
             Err(e) => reply.error(e),
@@ -394,6 +408,7 @@ impl FsCache {
                 return;
             }
         };
+        self.chown_to_requester(&path, req);
         match self.fresh_attr_for_path(&path) {
             Ok((_ino, attr)) => reply.created(
                 &TTL,

@@ -439,3 +439,40 @@ async fn copy_failure_leaves_no_partial_on_disk() {
         partials
     );
 }
+
+#[tokio::test]
+async fn validation_refreshes_snapshot_after_backing_chmod() {
+    let backing = TempDir::new().unwrap();
+    let cache_dir = TempDir::new().unwrap();
+
+    let rel = PathBuf::from("tv/Show/S01E01.mkv");
+    let backing_path = backing.path().join(&rel);
+    std::fs::create_dir_all(backing.path().join("tv/Show")).unwrap();
+    std::fs::write(&backing_path, b"episode content").unwrap();
+    std::fs::set_permissions(&backing_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+    let backing_store = open_backing_store(backing.path());
+    let cache_mgr = Arc::new(CacheManager::new(
+        cache_dir.path().to_path_buf(),
+        make_db(cache_dir.path()),
+        cache_dir.path().to_path_buf(),
+        1.0,
+        9999,
+        0.0,
+        Some(Arc::clone(&backing_store)),
+        &InvalidationConfig::default(),
+    ));
+    let cache_io = spawn_cache_io(Arc::clone(&cache_mgr), backing_store, 1440);
+    cache_io.submit_cache(rel.clone()).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let cached = cache_mgr.source_metadata(&rel).expect("copy must record a snapshot");
+    assert_eq!(cached.mode & 0o7777, 0o644);
+
+    std::fs::set_permissions(&backing_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    cache_io.submit_validation(rel.clone()).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    let refreshed = cache_mgr.source_metadata(&rel).expect("snapshot must survive validation");
+    assert_eq!(refreshed.mode & 0o7777, 0o600, "validation must pick up the chmod");
+    assert!(cache_dir.path().join(&rel).exists(), "a chmod alone must not evict");
+}

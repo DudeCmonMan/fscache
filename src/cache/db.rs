@@ -79,8 +79,18 @@ impl SourceMetadata {
         }
     }
 
+    // Rows cached before v0.3.7 have a source mtime but zeroed mode/uid/gid.
     pub fn has_snapshot(&self) -> bool {
-        self.mode != 0 || self.size != 0 || self.mtime_sec != 0 || self.mtime_nsec != 0
+        self.mode != 0
+    }
+
+    pub fn attrs_match(&self, other: &Self) -> bool {
+        self.mode == other.mode
+            && self.uid == other.uid
+            && self.gid == other.gid
+            && self.nlink == other.nlink
+            && self.ctime_sec == other.ctime_sec
+            && self.ctime_nsec == other.ctime_nsec
     }
 
     pub fn test_file(size: u64, mtime_sec: i64, mtime_nsec: i64) -> Self {
@@ -250,6 +260,25 @@ impl CacheDb {
             source.rdev as i64, source.blksize as i64,
         ]));
         tracing::info!(event = crate::telemetry::EVENT_DB_INSERT, path = %rel_path.display(), size_bytes = source.size, "db: mark_cached {}", rel_path.display());
+    }
+
+    pub fn update_source_metadata(&self, rel_path: &Path, mount_id: &str, source: &SourceMetadata) {
+        let key = rel_path.to_string_lossy();
+        let conn = self.conn.lock().unwrap();
+        let _ = conn.prepare_cached(
+            "UPDATE cache_files SET \
+              source_mtime_secs = ?3, source_mtime_nsecs = ?4, source_size_bytes = ?5, source_blocks = ?6, \
+              source_atime_sec = ?7, source_atime_nsec = ?8, source_ctime_sec = ?9, source_ctime_nsec = ?10, \
+              source_mode = ?11, source_nlink = ?12, source_uid = ?13, source_gid = ?14, source_rdev = ?15, \
+              source_blksize = ?16 \
+             WHERE rel_path = ?1 AND mount_id = ?2",
+        ).and_then(|mut s| s.execute(params![
+            key.as_ref(), mount_id, source.mtime_sec, source.mtime_nsec, source.size as i64,
+            source.blocks as i64, source.atime_sec, source.atime_nsec, source.ctime_sec, source.ctime_nsec,
+            source.mode as i64, source.nlink as i64, source.uid as i64, source.gid as i64,
+            source.rdev as i64, source.blksize as i64,
+        ]));
+        tracing::debug!(path = %rel_path.display(), mode = source.mode, "db: refreshed source metadata");
     }
 
     /// Update the last-hit timestamp for a file (called on cache hit in FUSE open).

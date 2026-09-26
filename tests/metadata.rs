@@ -329,3 +329,68 @@ fn setattr_updates_backing() {
         "utimens via FUSE mount must update backing file mtime"
     );
 }
+
+fn cache_with_snapshot(h: &FuseHarness, rel: &std::path::Path) -> fscache::cache::db::SourceMetadata {
+    let c = std::ffi::CString::new(h.backing_path().as_os_str().as_bytes()).unwrap();
+    let fd = unsafe { libc::open(c.as_ptr(), libc::O_PATH | libc::O_DIRECTORY) };
+    assert!(fd >= 0);
+    let bs = fscache::backing_store::BackingStore::new(fd);
+    fscache::cache::io::copy_for_tests(&bs, rel, &h.cache_path().join(rel)).unwrap();
+    let meta = std::fs::metadata(h.backing_path().join(rel)).unwrap();
+    fscache::cache::db::SourceMetadata::from_metadata(&meta)
+}
+
+#[tokio::test]
+async fn cached_getattr_reflects_chmod_through_mount() {
+    let h = FuseHarness::new_with_cache(1.0, 72).expect("FUSE harness with cache failed");
+    write_backing_file(&h, "tv/Show/S01E01.mkv", b"episode content");
+    let rel = std::path::Path::new("tv/Show/S01E01.mkv");
+    std::fs::set_permissions(h.backing_path().join(rel), std::fs::Permissions::from_mode(0o644))
+        .unwrap();
+    let snapshot = cache_with_snapshot(&h, rel);
+    h.cache_mgr().mark_cached(rel, snapshot);
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    std::fs::set_permissions(h.mount_path().join(rel), std::fs::Permissions::from_mode(0o600))
+        .expect("chmod through FUSE failed");
+
+    tokio::time::sleep(Duration::from_millis(1100)).await;
+
+    let stored = h.cache_mgr().source_metadata(rel).expect("snapshot must remain");
+    assert_eq!(stored.mode & 0o7777, 0o600, "chmod must refresh the cached snapshot");
+    let meta = std::fs::metadata(h.mount_path().join(rel)).unwrap();
+    assert_eq!(
+        meta.permissions().mode() & 0o7777,
+        0o600,
+        "cached getattr must report the new mode"
+    );
+}
+
+#[tokio::test]
+async fn zeroed_snapshot_falls_back_to_backing_attrs() {
+    let h = FuseHarness::new_with_cache(1.0, 72).expect("FUSE harness with cache failed");
+    write_backing_file(&h, "tv/Show/S01E02.mkv", b"episode two");
+    let rel = std::path::Path::new("tv/Show/S01E02.mkv");
+    std::fs::set_permissions(h.backing_path().join(rel), std::fs::Permissions::from_mode(0o640))
+        .unwrap();
+    let mut snapshot = cache_with_snapshot(&h, rel);
+    snapshot.mode = 0;
+    snapshot.uid = 0;
+    snapshot.gid = 0;
+    h.cache_mgr().mark_cached(rel, snapshot);
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    let backing_meta = std::fs::metadata(h.backing_path().join(rel)).unwrap();
+    let meta = std::fs::metadata(h.mount_path().join(rel)).unwrap();
+    assert_eq!(meta.permissions().mode() & 0o7777, 0o640);
+    assert_eq!(meta.uid(), backing_meta.uid());
+    assert_eq!(meta.gid(), backing_meta.gid());
+    assert_eq!(
+        std::fs::read(h.mount_path().join(rel)).expect("owner must be able to read"),
+        b"episode two"
+    );
+    let healed = h.cache_mgr().source_metadata(rel).expect("first stat must heal the row");
+    assert_eq!(healed.mode & 0o7777, 0o640);
+}

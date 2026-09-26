@@ -21,7 +21,10 @@ use tokio_util::sync::CancellationToken;
 
 fn test_fuse_config() -> fuser::Config {
     let mut config = fuser::Config::default();
-    config.mount_options = vec![MountOption::FSName("fscache-test".to_string())];
+    config.mount_options = vec![
+        MountOption::DefaultPermissions,
+        MountOption::FSName("fscache-test".to_string()),
+    ];
     config.acl = SessionACL::Owner;
     config
 }
@@ -345,6 +348,7 @@ impl OvermountHarness {
         let mut config = fuser::Config::default();
         config.mount_options = vec![
             MountOption::CUSTOM("nonempty".to_string()),
+            MountOption::DefaultPermissions,
             MountOption::FSName("fscache-overmount-test".to_string()),
         ];
         config.acl = SessionACL::Owner;

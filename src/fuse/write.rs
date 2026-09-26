@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::ffi::OsStr;
 use std::os::unix::io::RawFd;
 use std::path::Path;
@@ -36,13 +37,26 @@ impl FsCache {
         Ok(fd)
     }
 
-    fn chown_to_requester(&self, path: &Path, req: &Request) {
+    fn requester_owner(&self, path: &Path, req: &Request) -> (u32, Option<u32>) {
         let parent_is_setgid = path
             .parent()
             .and_then(|parent| self.backing_store.stat(parent))
             .is_some_and(|parent| parent.st_mode & libc::S_ISGID != 0);
         let gid = if parent_is_setgid { None } else { Some(req.gid()) };
-        if let Err(e) = self.backing_store.chown(path, Some(req.uid()), gid) {
+        (req.uid(), gid)
+    }
+
+    fn chown_to_requester(&self, path: &Path, req: &Request) {
+        let (uid, gid) = self.requester_owner(path, req);
+        if let Err(e) = self.backing_store.chown(path, Some(uid), gid) {
+            tracing::warn!(path = %path.display(), error = %e, "could not hand ownership to requester");
+        }
+    }
+
+    fn fchown_to_requester(&self, fd: RawFd, path: &Path, req: &Request) {
+        let (uid, gid) = self.requester_owner(path, req);
+        if unsafe { libc::fchown(fd, uid, gid.unwrap_or(!0)) } != 0 {
+            let e = std::io::Error::last_os_error();
             tracing::warn!(path = %path.display(), error = %e, "could not hand ownership to requester");
         }
     }
@@ -128,7 +142,14 @@ impl FsCache {
         }
 
         match self.stat_backing(&path) {
-            Some(stat) => reply.attr(&TTL, &self.stat_to_attr(ino.0, &stat)),
+            Some(stat) => {
+                if let Some(cache) = &self.cache
+                    && cache.is_cached(&path)
+                {
+                    cache.refresh_source_metadata(&path, &stat);
+                }
+                reply.attr(&TTL, &self.stat_to_attr(ino.0, &stat))
+            }
             None => reply.error(Errno::ENOENT),
         }
     }
@@ -143,6 +164,7 @@ impl FsCache {
         rdev: u32,
         reply: ReplyEntry,
     ) {
+        clear_thread_umask();
         let path = match self.child_path(parent, name) {
             Ok(path) => path,
             Err(e) => {
@@ -174,6 +196,7 @@ impl FsCache {
         umask: u32,
         reply: ReplyEntry,
     ) {
+        clear_thread_umask();
         let path = match self.child_path(parent, name) {
             Ok(path) => path,
             Err(e) => {
@@ -389,6 +412,7 @@ impl FsCache {
         flags: i32,
         reply: ReplyCreate,
     ) {
+        clear_thread_umask();
         let path = match self.child_path(parent, name) {
             Ok(path) => path,
             Err(e) => {
@@ -398,17 +422,22 @@ impl FsCache {
         };
         let fd = match self.open_write_handle(
             &path,
-            flags | libc::O_CREAT,
+            flags | libc::O_CREAT | libc::O_EXCL,
             apply_umask(mode, umask),
             req.pid(),
         ) {
             Ok(fd) => fd,
+            Err(e) if e.code() == libc::EEXIST && flags & libc::O_EXCL == 0 => {
+                // Kernel retries with a fresh lookup and opens the existing file with permission checks.
+                reply.error(Errno::ESTALE);
+                return;
+            }
             Err(e) => {
                 reply.error(e);
                 return;
             }
         };
-        self.chown_to_requester(&path, req);
+        self.fchown_to_requester(fd, &path, req);
         match self.fresh_attr_for_path(&path) {
             Ok((_ino, attr)) => reply.created(
                 &TTL,
@@ -479,4 +508,23 @@ impl FsCache {
             Err(e) => reply.error(e),
         }
     }
+}
+
+// Per-thread so cache copies keep the daemon umask; the kernel already applied the caller's.
+fn clear_thread_umask() {
+    thread_local! {
+        static CLEARED: Cell<bool> = const { Cell::new(false) };
+    }
+    CLEARED.with(|cleared| {
+        if cleared.get() {
+            return;
+        }
+        cleared.set(true);
+        if unsafe { libc::unshare(libc::CLONE_FS) } == 0 {
+            unsafe { libc::umask(0) };
+        } else {
+            let e = std::io::Error::last_os_error();
+            tracing::warn!(error = %e, "could not isolate umask; new files get the daemon umask applied");
+        }
+    });
 }

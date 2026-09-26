@@ -508,7 +508,8 @@ async fn job_worker(io: CacheIO, job: CacheJob) {
 
 async fn validate_worker(io: CacheIO, rel_path: PathBuf, kind: CacheJobKind) {
     match io.cache.is_stale(&rel_path) {
-        StaleResult::Fresh | StaleResult::NotTracked => {}
+        StaleResult::Fresh(live) => io.cache.refresh_source_metadata(&rel_path, &live),
+        StaleResult::NotTracked => {}
         StaleResult::NeedsBackfill(st) => io.cache.backfill_fingerprint(&rel_path, &st),
         StaleResult::BackingGone => io
             .cache
@@ -581,7 +582,6 @@ fn perform_copy_inner(
     let mut src = unsafe { File::from_raw_fd(src_fd) };
 
     let src_meta = src.metadata()?;
-    let source_snapshot = SourceMetadata::from_metadata(&src_meta);
     let file_size_bytes = src_meta.len();
     let initial_mtime = src_meta.mtime();
     let initial_size = src_meta.len() as i64;
@@ -623,15 +623,14 @@ fn perform_copy_inner(
     }
     drop(dst);
 
-    apply_source_metadata(&partial, &src_meta)?;
-
     // Before committing, verify the backing hasn't changed since the copy started.
     // Catches rename-replace and signals from the backing watcher (abort flag).
     let aborted = control
         .as_ref()
         .is_some_and(|c| c.abort.load(Ordering::Acquire));
     let initial_mtime_nsec = src_meta.mtime_nsec();
-    let stale = bs.stat(rel_path).is_some_and(|s| {
+    let final_stat = bs.stat(rel_path);
+    let stale = final_stat.is_some_and(|s| {
         s.st_size != initial_size
             || s.st_mtime != initial_mtime
             || s.st_mtime_nsec != initial_mtime_nsec
@@ -640,6 +639,13 @@ fn perform_copy_inner(
         let _ = std::fs::remove_file(&partial);
         return Err(std::io::Error::other("backing changed during copy"));
     }
+
+    // A chmod/chown during the copy leaves mtime alone, so snapshot the final stat.
+    let source_snapshot = final_stat.map_or_else(
+        || SourceMetadata::from_metadata(&src_meta),
+        |s| SourceMetadata::from_stat(&s),
+    );
+    apply_source_metadata(&partial, &source_snapshot)?;
 
     if let Err(e) = std::fs::rename(&partial, cache_dest) {
         let _ = std::fs::remove_file(&partial);
@@ -661,14 +667,14 @@ fn partial_path(dest: &Path) -> PathBuf {
     PathBuf::from(s)
 }
 
-fn apply_source_metadata(path: &Path, meta: &std::fs::Metadata) -> std::io::Result<()> {
+fn apply_source_metadata(path: &Path, meta: &SourceMetadata) -> std::io::Result<()> {
     let c = CString::new(path.as_os_str().as_bytes())
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidInput, "path contains NUL"))?;
     unsafe {
-        if libc::chmod(c.as_ptr(), (meta.mode() & 0o7777) as libc::mode_t) != 0 {
+        if libc::chmod(c.as_ptr(), (meta.mode & 0o7777) as libc::mode_t) != 0 {
             return Err(std::io::Error::last_os_error());
         }
-        if libc::lchown(c.as_ptr(), meta.uid(), meta.gid()) != 0 {
+        if libc::lchown(c.as_ptr(), meta.uid, meta.gid) != 0 {
             tracing::debug!(
                 "cache_io: lchown({}) failed: {}",
                 path.display(),
@@ -677,12 +683,12 @@ fn apply_source_metadata(path: &Path, meta: &std::fs::Metadata) -> std::io::Resu
         }
         let times = [
             libc::timespec {
-                tv_sec: meta.atime() as libc::time_t,
-                tv_nsec: meta.atime_nsec() as libc::c_long,
+                tv_sec: meta.atime_sec as libc::time_t,
+                tv_nsec: meta.atime_nsec as libc::c_long,
             },
             libc::timespec {
-                tv_sec: meta.mtime() as libc::time_t,
-                tv_nsec: meta.mtime_nsec() as libc::c_long,
+                tv_sec: meta.mtime_sec as libc::time_t,
+                tv_nsec: meta.mtime_nsec as libc::c_long,
             },
         ];
         if libc::utimensat(libc::AT_FDCWD, c.as_ptr(), times.as_ptr(), 0) != 0 {

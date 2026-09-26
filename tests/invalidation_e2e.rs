@@ -10,6 +10,7 @@ mod common;
 use common::{FuseHarness, write_backing_file};
 use fscache::cache::db::SourceMetadata;
 use fscache::config::InvalidationConfig;
+use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::time::Duration;
 
@@ -415,4 +416,34 @@ fn e2e_direct_sweep_mixed_fresh_and_stale() {
     // Stale file now falls through to updated backing.
     let stale = std::fs::read(h.mount_path().join("stale.mkv")).unwrap();
     assert_eq!(stale, b"backing__v2___");
+}
+
+#[test]
+fn e2e_direct_sweep_refreshes_zeroed_metadata() {
+    let cfg = InvalidationConfig {
+        check_on_hit: false,
+        check_on_maintenance: true,
+    };
+    let h = FuseHarness::new_with_cache_and_invalidation(1.0, 72, &cfg).unwrap();
+
+    write_backing_file(&h, "old.mkv", b"backing_data__");
+    std::fs::write(h.cache_path().join("old.mkv"), b"backing_data__").unwrap();
+    let meta = std::fs::metadata(h.backing_path().join("old.mkv")).unwrap();
+    let mut snapshot = SourceMetadata::from_metadata(&meta);
+    snapshot.mode = 0;
+    snapshot.uid = 0;
+    snapshot.gid = 0;
+    h.cache_mgr().mark_cached(Path::new("old.mkv"), snapshot);
+    assert!(h.cache_mgr().source_metadata(Path::new("old.mkv")).is_none());
+
+    let (checked, dropped) = h.cache_mgr().sweep_stale();
+    assert_eq!((checked, dropped), (1, 0));
+
+    let refreshed = h
+        .cache_mgr()
+        .source_metadata(Path::new("old.mkv"))
+        .expect("sweep must fill in the zeroed snapshot");
+    assert_eq!(refreshed.mode, meta.mode());
+    assert_eq!(refreshed.uid, meta.uid());
+    assert_eq!(refreshed.gid, meta.gid());
 }

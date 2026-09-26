@@ -172,9 +172,13 @@ impl FsCache {
         if !cache.is_cached(rel_path) {
             return None;
         }
-        cache
-            .source_metadata(rel_path)
-            .map(|m| self.source_metadata_to_attr(ino, &m))
+        if let Some(snapshot) = cache.source_metadata(rel_path) {
+            return Some(self.source_metadata_to_attr(ino, &snapshot));
+        }
+        // Heal pre-v0.3.7 rows on first touch so later lookups skip the backing stat.
+        let stat = self.stat_backing(rel_path)?;
+        cache.refresh_source_metadata(rel_path, &stat);
+        Some(self.stat_to_attr(ino, &stat))
     }
 
     pub(crate) fn list_dir_entries(

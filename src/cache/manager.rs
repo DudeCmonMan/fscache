@@ -8,7 +8,7 @@ use crate::backing_store::BackingStore;
 /// Result of a staleness check against the backing store.
 pub enum StaleResult {
     /// Cached file matches the backing (mtime seconds, nsecs, and size all agree).
-    Fresh,
+    Fresh(libc::stat),
     /// At least one fingerprint field differs — cache entry is outdated.
     Stale,
     /// Backing file no longer exists — cache entry is dangling.
@@ -147,28 +147,12 @@ impl CacheManager {
     /// Check whether the cached copy of `rel` is still consistent with the backing file.
     /// Does one DB lookup + one backing stat. Returns `NotTracked` if no backing is configured.
     pub fn is_stale(&self, rel: &Path) -> StaleResult {
-        let backing = match &self.backing {
-            Some(b) => b,
-            None => return StaleResult::NotTracked,
-        };
-        let fp = match self.db.fingerprint_row(rel, &self.mount_id) {
-            Some(f) => f,
-            None => return StaleResult::NotTracked,
-        };
-        let live = match backing.stat(rel) {
-            Some(s) => s,
-            None => return StaleResult::BackingGone,
-        };
-        if fp.source_mtime_secs == 0 && fp.source_mtime_nsecs == 0 {
-            return StaleResult::NeedsBackfill(live);
+        if self.backing.is_none() {
+            return StaleResult::NotTracked;
         }
-        let stale = fp.source_mtime_secs != live.st_mtime
-            || fp.source_mtime_nsecs != live.st_mtime_nsec
-            || fp.size_bytes != live.st_size as u64;
-        if stale {
-            StaleResult::Stale
-        } else {
-            StaleResult::Fresh
+        match self.db.fingerprint_row(rel, &self.mount_id) {
+            Some(fp) => self.is_stale_with_fingerprint(rel, &fp),
+            None => StaleResult::NotTracked,
         }
     }
 
@@ -186,14 +170,33 @@ impl CacheManager {
         if fp.source_mtime_secs == 0 && fp.source_mtime_nsecs == 0 {
             return StaleResult::NeedsBackfill(live);
         }
-        let stale = fp.source_mtime_secs != live.st_mtime
-            || fp.source_mtime_nsecs != live.st_mtime_nsec
-            || fp.size_bytes != live.st_size as u64;
-        if stale {
-            StaleResult::Stale
+        if content_matches(fp, &live) {
+            StaleResult::Fresh(live)
         } else {
-            StaleResult::Fresh
+            StaleResult::Stale
         }
+    }
+
+    /// Content changes are left to the Stale → Replace path.
+    pub fn refresh_source_metadata(&self, rel: &Path, live: &libc::stat) {
+        let Some(fp) = self.db.fingerprint_row(rel, &self.mount_id) else {
+            return;
+        };
+        if fp.source_mtime_secs == 0 && fp.source_mtime_nsecs == 0 {
+            return;
+        }
+        if !content_matches(&fp, live) {
+            return;
+        }
+        let fresh = SourceMetadata::from_stat(live);
+        if self
+            .db
+            .source_metadata_row(rel, &self.mount_id)
+            .is_some_and(|stored| stored.attrs_match(&fresh))
+        {
+            return;
+        }
+        self.db.update_source_metadata(rel, &self.mount_id, &fresh);
     }
 
     /// Remove a stale cache entry — deletes the file from disk and removes the DB row.
@@ -242,7 +245,10 @@ impl CacheManager {
                 StaleResult::NeedsBackfill(st) => {
                     self.backfill_fingerprint(&rel, &st);
                 }
-                _ => {}
+                StaleResult::Fresh(live) => {
+                    self.refresh_source_metadata(&rel, &live);
+                }
+                StaleResult::NotTracked => {}
             }
             checked += 1;
         }
@@ -413,4 +419,10 @@ fn free_space_bytes(path: &Path) -> Option<u64> {
 
 fn total_space_bytes(path: &Path) -> Option<u64> {
     statvfs_query(path).map(|s| s.f_blocks * s.f_frsize)
+}
+
+fn content_matches(fp: &Fingerprint, live: &libc::stat) -> bool {
+    fp.source_mtime_secs == live.st_mtime
+        && fp.source_mtime_nsecs == live.st_mtime_nsec
+        && fp.size_bytes == live.st_size as u64
 }

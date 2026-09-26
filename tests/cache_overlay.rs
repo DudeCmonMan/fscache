@@ -360,7 +360,7 @@ fn is_stale_returns_fresh_after_copy() {
 
     let result = mgr.is_stale(std::path::Path::new("episode.mkv"));
     assert!(
-        matches!(result, StaleResult::Fresh),
+        matches!(result, StaleResult::Fresh(_)),
         "newly cached file should be Fresh"
     );
 }
@@ -454,7 +454,7 @@ fn is_stale_returns_needs_backfill_for_zero_fingerprint() {
     assert!(
         matches!(
             mgr.is_stale(std::path::Path::new("episode.mkv")),
-            StaleResult::Fresh
+            StaleResult::Fresh(_)
         ),
         "after backfill, file should be Fresh"
     );

@@ -10,7 +10,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/fscache --config /etc/fscache/config.toml
+ExecStart=/usr/local/bin/fscache start --config /etc/fscache/config.toml
 Restart=on-failure
 RestartSec=10
 

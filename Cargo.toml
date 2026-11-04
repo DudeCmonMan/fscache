@@ -37,6 +37,14 @@ crossterm = { version = "0.28", features = ["event-stream"] }
 futures = "0.3"
 inotify = { version = "0.11", features = ["stream"] }
 
+[profile.release]
+# Smaller, slightly faster release binary (used by both the Docker image and
+# the GitHub release tarball). strip = true drops the symbol table, so panic
+# backtraces show addresses instead of function names.
+strip = true
+lto = "thin"
+codegen-units = 1
+
 [dev-dependencies]
 tempfile = "3"
 sha2 = "0.10"

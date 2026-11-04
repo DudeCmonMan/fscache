@@ -13,13 +13,24 @@ fn git(args: &[&str]) -> Option<String> {
 fn main() {
     println!("cargo:rerun-if-changed=.git/HEAD");
     println!("cargo:rerun-if-changed=.git/index");
+    println!("cargo:rerun-if-env-changed=FSCACHE_GIT_HASH");
 
-    let hash = git(&["rev-parse", "--short", "HEAD"]).unwrap_or_else(|| "unknown".to_string());
-    let dirty = Command::new("git")
-        .args(["diff", "--quiet", "HEAD"])
-        .status()
-        .map(|s| !s.success())
-        .unwrap_or(false);
+    // Builds without a .git directory (e.g. Docker, where .git is excluded
+    // from the build context) can supply the hash explicitly. When set, it is
+    // used verbatim and the dirty check is skipped — outside a repo,
+    // `git diff` fails and would otherwise mark every build as dirty.
+    let (hash, dirty) = match std::env::var("FSCACHE_GIT_HASH") {
+        Ok(h) if !h.trim().is_empty() => (h.trim().to_string(), false),
+        _ => {
+            let hash = git(&["rev-parse", "--short", "HEAD"]).unwrap_or_else(|| "unknown".to_string());
+            let dirty = Command::new("git")
+                .args(["diff", "--quiet", "HEAD"])
+                .status()
+                .map(|s| !s.success())
+                .unwrap_or(false);
+            (hash, dirty)
+        }
+    };
     let timestamp = Command::new("date")
         .arg("+%Y-%m-%d %H:%M")
         .output()

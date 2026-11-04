@@ -71,7 +71,8 @@ impl SourceMetadata {
             ctime_sec: st.st_ctime,
             ctime_nsec: st.st_ctime_nsec,
             mode: st.st_mode,
-            nlink: st.st_nlink,
+            // nlink_t is u64 on x86_64 Linux but u32 on aarch64.
+            nlink: st.st_nlink as u64,
             uid: st.st_uid,
             gid: st.st_gid,
             rdev: st.st_rdev,

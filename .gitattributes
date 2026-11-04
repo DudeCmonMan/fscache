@@ -1,0 +1,5 @@
+# Shell scripts and files copied into the Docker image must keep LF line
+# endings even on Windows checkouts (core.autocrlf=true). A CRLF entrypoint
+# fails at container start with "/usr/bin/env: 'bash\r': No such file".
+*.sh                        text eol=lf
+docker/config.template.toml text eol=lf

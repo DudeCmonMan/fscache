@@ -15,10 +15,7 @@ fn main() {
     println!("cargo:rerun-if-changed=.git/index");
     println!("cargo:rerun-if-env-changed=FSCACHE_GIT_HASH");
 
-    // Builds without a .git directory (e.g. Docker, where .git is excluded
-    // from the build context) can supply the hash explicitly. When set, it is
-    // used verbatim and the dirty check is skipped — outside a repo,
-    // `git diff` fails and would otherwise mark every build as dirty.
+    // Docker builds have no .git, so they pass the hash in.
     let (hash, dirty) = match std::env::var("FSCACHE_GIT_HASH") {
         Ok(h) if !h.trim().is_empty() => (h.trim().to_string(), false),
         _ => {

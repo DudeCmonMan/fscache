@@ -5,10 +5,7 @@
 # Multi-stage build: compile from source, then package into a slim runtime
 # image with only the binary, fuse3, and a default config.
 #
-# Build:   ./docker/build.sh            (see the script for --tag/--push)
-#    or:   docker buildx build -f docker/Dockerfile \
-#            --build-arg FSCACHE_GIT_HASH="$(git rev-parse --short HEAD)" \
-#            -t dudecmonman/fscache .
+# Build:   ./docker/build.sh
 # Run:     see docker/README.md for the compose snippet
 # ──────────────────────────────────────────────────────────────────────────
 
@@ -16,25 +13,17 @@
 FROM rust:1-bookworm AS build
 WORKDIR /src
 
-# .git is excluded from the build context, so build.rs can't ask git for the
-# commit hash. Pass it in instead; it ends up in `fscache --version`.
+# .git isn't in the build context, so build.rs reads the commit hash from here.
 ARG FSCACHE_GIT_HASH=unknown
 ENV FSCACHE_GIT_HASH=${FSCACHE_GIT_HASH}
-
-# Set automatically by BuildKit; used to keep per-architecture build caches
-# apart during multi-platform builds.
-ARG TARGETPLATFORM
 
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY src/ src/
 
-# Cache mounts keep the cargo registry and compiled dependencies between
-# builds, so a source change only recompiles fscache itself instead of every
-# crate. target/ lives in the cache mount, so the binary is copied out in the
-# same step.
-RUN --mount=type=cache,id=cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,id=cargo-git,target=/usr/local/cargo/git,sharing=locked \
-    --mount=type=cache,id=fscache-target-${TARGETPLATFORM},target=/src/target,sharing=locked \
+# Cache the registry and target/ so source changes don't rebuild every dependency.
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,target=/src/target,sharing=locked \
     cargo build --release --locked --bin fscache \
  && cp target/release/fscache /usr/local/bin/fscache
 

@@ -25,14 +25,26 @@ done
 
 FULL_TAG="${IMAGE}:${TAG}"
 
-echo "Building ${FULL_TAG}..."
-docker buildx build -f docker/Dockerfile -t "$FULL_TAG" .
-echo ""
-echo "Build succeeded: ${FULL_TAG}"
+# .git isn't in the build context, so pass the commit hash in for `fscache --version`.
+GIT_HASH="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+if [[ "$GIT_HASH" != unknown ]] && ! git diff --quiet HEAD 2>/dev/null; then
+    GIT_HASH="${GIT_HASH}-dirty"
+fi
 
+ARGS=(-f docker/Dockerfile -t "$FULL_TAG" --platform linux/amd64 --build-arg "FSCACHE_GIT_HASH=${GIT_HASH}")
+
+# Push from buildx directly; a separate `docker push` fails with non-default builders.
 if [[ "$PUSH" == true ]]; then
-    echo ""
-    echo "Pushing ${FULL_TAG}..."
-    docker push "$FULL_TAG"
-    echo "Pushed: ${FULL_TAG}"
+    ARGS+=(--push)
+else
+    ARGS+=(--load)
+fi
+
+echo "Building ${FULL_TAG} (commit ${GIT_HASH})..."
+docker buildx build "${ARGS[@]}" .
+echo ""
+if [[ "$PUSH" == true ]]; then
+    echo "Built and pushed: ${FULL_TAG}"
+else
+    echo "Build succeeded: ${FULL_TAG}"
 fi

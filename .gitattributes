@@ -1,0 +1,3 @@
+# Keep LF so files copied into the Docker image work from Windows checkouts.
+*.sh                        text eol=lf
+docker/config.template.toml text eol=lf
